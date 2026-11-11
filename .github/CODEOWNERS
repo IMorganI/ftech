@@ -1,0 +1,8 @@
+# Изменения в этих местах требуют одобрения владельца.
+*                     @IMorganI
+/migrations/          @IMorganI
+/src/                 @IMorganI
+/.github/             @IMorganI
+/package.json         @IMorganI
+/package-lock.json    @IMorganI
+/.npmrc               @IMorganI
