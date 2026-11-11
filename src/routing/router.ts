@@ -331,8 +331,14 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
         `INSERT INTO ledger_entries (transaction_id, account, amount, currency) VALUES
            ($1, 'merchant:' || $2, $3, $4), ($1, 'player:' || $5, -$3::bigint, $4)`,
         [txId, attempt.merchant_account_id, amount, tx.currency, tx.player_id]);
+      // Снимок комиссий: заработок платформы и расход на провайдера (округление вниз до цента).
       const done = toView((await c.query(
-        `UPDATE transactions SET status = 'success', updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`, [txId])).rows[0]);
+        `UPDATE transactions t SET status = 'success', updated_at = now(),
+           platform_fee = t.amount * o.platform_fee_bps / 10000,
+           provider_fee = t.amount * m.fee_bps / 10000
+         FROM sites s, operators o, merchant_accounts m
+         WHERE t.id = $1 AND s.id = t.site_id AND o.id = s.operator_id AND m.id = $2
+         RETURNING ${TX_COLUMNS.split(', ').map((col) => 't.' + col).join(', ')}`, [txId, attempt.merchant_account_id])).rows[0]);
       await enqueueSiteEvent(c, done, 'deposit.succeeded');
       return done;
     }

@@ -169,9 +169,9 @@ function showChangePassword() {
 // ---------- каркас ----------
 
 const TABS = [
-  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['sandbox', 'Песочница', 'viewer'],
-  ['issues', 'Расхождения', 'viewer'], ['sites', 'Сайты', 'admin'], ['setup', 'Операторы и провайдеры', 'admin'],
-  ['users', 'Пользователи', 'admin'], ['audit', 'Журнал', 'admin'],
+  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['accounts', 'Аккаунты', 'viewer'],
+  ['sandbox', 'Тест-платёж', 'viewer'], ['issues', 'Проблемы', 'viewer'], ['sites', 'Сайты', 'admin'],
+  ['setup', 'Настройки', 'admin'], ['users', 'Команда', 'admin'], ['audit', 'Журнал', 'admin'],
 ];
 
 async function boot() {
@@ -205,32 +205,137 @@ function renderShell() {
   };
   run();
   // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
-  if (['overview', 'payments', 'issues'].includes(state.tab)) {
+  if (['overview', 'payments', 'accounts', 'issues'].includes(state.tab)) {
     state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
   }
 }
 
-// ---------- обзор и аккаунты ----------
+// ---------- обзор: деньги и депозиты ----------
+
+const PERIODS = [['today', 'Сегодня'], ['7d', '7 дней'], ['30d', '30 дней']];
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+const plural = (n, one, few, many) => { const m10 = n % 10, m100 = n % 100; return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many; };
+const moneyList = (rows, key) => rows.filter((r) => BigInt(r[key]) !== 0n).map((r) => money(r[key], r.currency));
+
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) el.setAttribute(k, String(v));
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined) el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+
+/** Столбики: успешные депозиты по часам/дням, сверху — отказы. Подсказка при наведении — через <title>. */
+function depositsChart(series, unit) {
+  const W = 760, H = 200, L = 34, B = 24, T = 8;
+  const max = Math.max(1, ...series.map((p) => p.succeeded + p.declined));
+  const step = Math.max(1, Math.ceil(max / 4));
+  const top = Math.ceil(max / step) * step;
+  const y = (v) => T + (H - T - B) * (1 - v / top);
+  const bw = (W - L) / series.length;
+  const label = (b) => unit === 'hour' ? b.slice(11, 13) : `${b.slice(8, 10)}.${b.slice(5, 7)}`;
+  const every = Math.ceil(series.length / 12);
+  const grid = [];
+  for (let v = 0; v <= top; v += step) {
+    grid.push(svg('line', { x1: L, x2: W, y1: y(v), y2: y(v), class: 'grid' }), svg('text', { x: L - 6, y: y(v) + 4, class: 'axis', 'text-anchor': 'end' }, v));
+  }
+  const bars = series.map((p, i) => {
+    const x = L + i * bw + bw * 0.15, w = bw * 0.7;
+    const vol = Object.entries(p.volume || {}).map(([c, v]) => money(v, c)).join(', ') || '0';
+    const when = unit === 'hour' ? `${label(p.bucket)}:00` : label(p.bucket);
+    return svg('g', null,
+      svg('title', null, `${when}: ${p.succeeded} ${plural(p.succeeded, 'успешный', 'успешных', 'успешных')} (${vol}), отказов ${p.declined}`),
+      svg('rect', { x, width: w, y: y(p.succeeded), height: Math.max(0, y(0) - y(p.succeeded)), class: 'bar-ok', rx: 2 }),
+      p.declined ? svg('rect', { x, width: w, y: y(p.succeeded + p.declined), height: y(p.succeeded) - y(p.succeeded + p.declined), class: 'bar-bad', rx: 2 }) : null,
+      i % every === 0 ? svg('text', { x: x + w / 2, y: H - 6, class: 'axis', 'text-anchor': 'middle' }, label(p.bucket)) : null);
+  });
+  return svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'chart', role: 'img', 'aria-label': 'Депозиты по времени' }, grid, bars);
+}
 
 async function viewOverview(main) {
-  const [o, accounts] = await Promise.all([api('GET', '/admin/v1/overview'), api('GET', '/admin/v1/accounts')]);
-  const rate = o.tx_24h ? Math.round((o.success_24h / o.tx_24h) * 100) + '%' : '—';
-  const volume = Object.entries(o.volume_24h || {}).map(([c, v]) => money(v, c)).join(' · ') || '0';
-  const stat = (value, label, alert) => h('div', { class: `stat ${alert ? 'alert' : ''}` }, h('b', null, value), h('span', null, label));
+  const period = state.cache.period || '7d';
+  const s = await api('GET', `/admin/v1/stats?period=${period}&tz=${encodeURIComponent(TZ)}`);
+  const o = await api('GET', '/admin/v1/overview');
+  const t = s.totals;
+  const sum = (k) => t.reduce((a, r) => a + r[k], 0);
+  const succeeded = sum('succeeded'), declined = sum('declined'), pending = sum('pending'), attempts = sum('attempts');
+  const conversion = succeeded + declined ? Math.round((succeeded / (succeeded + declined)) * 100) : null;
+  const volume = moneyList(t, 'volume'), earned = moneyList(t, 'earned'), cost = moneyList(t, 'provider_cost');
+  const feePct = s.platformFeeBps.max === null ? null : s.platformFeeBps.min === s.platformFeeBps.max
+    ? `${s.platformFeeBps.max / 100}%` : `${s.platformFeeBps.min / 100}–${s.platformFeeBps.max / 100}%`;
+  const periodName = PERIODS.find(([id]) => id === period)[1].toLowerCase();
+  const attention = o.open_issues + o.failed_webhooks;
 
-  const keepOpen = state.cache.editing;
-  main.replaceChildren(
+  const kpi = (label, value, sub, cls) => h('div', { class: `kpi ${cls || ''}` },
+    h('span', { class: 'kpi-label' }, label),
+    h('b', { class: 'kpi-value' }, ...(Array.isArray(value) ? (value.length ? value.map((v) => h('span', null, v)) : ['0']) : [value])),
+    sub ? h('span', { class: 'kpi-sub' }, sub) : null);
+
+  const switcher = h('div', { class: 'seg', role: 'group', 'aria-label': 'Период' },
+    PERIODS.map(([id, name]) => h('button', { class: id === period ? 'on' : '', 'aria-pressed': id === period, onclick: () => { state.cache.period = id; renderShell(); } }, name)));
+
+  const goto = (tab) => () => { state.tab = tab; location.hash = tab; renderShell(); };
+
+  main.replaceChildren(...[
+    attempts === 0 && o.tx_24h === 0 ? h('section', { class: 'panel hint' },
+      h('h3', null, 'Здесь пока тихо'),
+      h('p', null, 'Как только сайты начнут присылать депозиты, тут появятся цифры. Чтобы посмотреть, как всё работает, проведи тестовый платёж:'),
+      h('ol', { class: 'steps' },
+        h('li', null, 'Открой вкладку «Тест-платёж» и вставь API-ключ сайта (для демо — из файла DEMO-CREDENTIALS.md).'),
+        h('li', null, 'Нажми «Создать депозит», затем «Открыть страницу оплаты» и «Оплатить».'),
+        h('li', null, 'Вернись сюда — депозит и заработок появятся в цифрах.')),
+      h('div', null, h('button', { class: 'primary', onclick: goto('sandbox') }, 'Провести тестовый платёж'))) : null,
+
     h('section', { class: 'panel' },
-      h('h2', null, 'За 24 часа'),
-      h('div', { class: 'stats' },
-        stat(o.tx_24h, 'платежей'), stat(rate, 'успешных'), stat(volume, 'оборот'),
-        stat(o.pending, 'ожидают оплаты'), stat(o.open_issues, 'открытых расхождений', o.open_issues > 0),
-        stat(o.failed_webhooks, 'недоставленных вебхуков', o.failed_webhooks > 0))),
-    h('section', { class: 'panel' },
-      h('div', { class: 'row' }, h('h2', null, 'Мерчант-аккаунты'), h('span', { class: 'note' }, 'шкала — оборот за сегодня; черта — порог переключения')),
-      accounts.length ? h('div', { class: 'accs' }, accounts.map((a) => accountCard(a, keepOpen === a.id)))
-        : h('p', { class: 'note' }, 'Аккаунтов пока нет.'),
-      can('admin') ? newAccountForm() : null));
+      h('div', { class: 'row' }, h('h2', null, `Итоги · ${periodName}`), switcher),
+      h('div', { class: 'kpis' },
+        kpi('Успешных депозитов', String(succeeded),
+          attempts ? `из ${attempts} ${plural(attempts, 'попытки', 'попыток', 'попыток')}` + (pending ? ` · ${pending} ждут оплаты` : '') : 'попыток не было', 'main'),
+        kpi('Конверсия', conversion === null ? '—' : `${conversion}%`, declined ? `${declined} ${plural(declined, 'отказ', 'отказа', 'отказов')}` : 'отказов нет'),
+        kpi('Оборот', volume, 'сумма успешных депозитов'),
+        kpi('Заработали', earned, feePct === null ? null : `комиссия платформы ${feePct}` + (cost.length ? ` · провайдерам ушло ${cost.join(', ')}` : ''), 'money')),
+      feePct === '0%' ? h('div', { class: 'msg warn' }, 'Комиссия платформы не задана — заработок считается как 0. Укажи процент во вкладке «Настройки» у оператора.') : null,
+      h('div', { class: 'chart-wrap' }, depositsChart(s.series, s.unit)),
+      h('div', { class: 'legend' }, h('span', { class: 'sw ok' }), 'успешные', h('span', { class: 'sw bad' }), 'отказы',
+        h('span', { class: 'note' }, s.unit === 'hour' ? ' · по часам' : ' · по дням', ` · время ${s.tz}`))),
+
+    h('div', { class: 'grid2' },
+      h('section', { class: 'panel' },
+        h('h2', null, 'По сайтам'),
+        s.bySite.length ? h('div', { class: 'tbl' }, h('table', null,
+          h('thead', null, h('tr', null, ['Сайт', 'Успешно', 'Оборот', 'Заработали'].map((x) => h('th', null, x)))),
+          h('tbody', null, s.bySite.map((r) => h('tr', null,
+            h('td', null, r.site), h('td', { class: 'n' }, `${r.succeeded} из ${r.attempts}`),
+            h('td', { class: 'n' }, money(r.volume, r.currency)), h('td', { class: 'n money' }, money(r.earned, r.currency)))))))
+          : h('p', { class: 'note' }, `За ${periodName === 'сегодня' ? 'сегодня' : 'этот период'} депозитов не было.`)),
+      h('section', { class: 'panel' },
+        h('div', { class: 'row' }, h('h2', null, 'Последние депозиты'), h('button', { class: 'link', onclick: goto('payments') }, 'Все платежи →')),
+        s.recent.length ? h('div', { class: 'tbl' }, h('table', null, h('tbody', null, s.recent.map((r) => h('tr', { class: 'click', tabindex: 0,
+          onclick: () => { state.cache.selTx = r.id; goto('payments')(); }, onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
+          h('td', { class: 'n dim' }, when(r.created_at).slice(0, 12)), h('td', null, r.site, h('div', { class: 'note' }, r.player)),
+          h('td', { class: 'n' }, money(r.amount, r.currency)),
+          h('td', null, pill(r.status), r.decline_code ? h('div', { class: 'note' }, DECLINE[r.decline_code] || r.decline_code) : null))))))
+          : h('p', { class: 'note' }, 'Пока ни одного.'))),
+
+    h('section', { class: `panel ${attention ? 'attention' : ''}` },
+      h('h2', null, 'Требует внимания'),
+      attention ? h('ul', { class: 'plain' },
+        o.open_issues ? h('li', null, h('button', { class: 'link', onclick: goto('issues') }, `${o.open_issues} ${plural(o.open_issues, 'расхождение', 'расхождения', 'расхождений')} с провайдерами`), ' — нужно проверить вручную') : null,
+        o.failed_webhooks ? h('li', null, `${o.failed_webhooks} ${plural(o.failed_webhooks, 'уведомление', 'уведомления', 'уведомлений')} сайтам не удалось доставить — проверь адреса вебхуков во вкладке «Сайты»`) : null)
+        : h('p', { class: 'note' }, 'Всё в порядке: расхождений и недоставленных уведомлений нет.')),
+  ].filter(Boolean)); // replaceChildren превратил бы null в текст «null»
+}
+
+// ---------- платёжные аккаунты ----------
+
+async function viewAccounts(main) {
+  const accounts = await api('GET', '/admin/v1/accounts');
+  const active = accounts.filter((a) => a.enabled).length;
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('div', { class: 'row' }, h('h2', null, 'Платёжные аккаунты'), h('span', { class: 'note' }, `${active} из ${accounts.length} включены`)),
+    h('p', { class: 'note' }, 'Аккаунты у платёжных провайдеров, между которыми распределяются депозиты. Шкала показывает, сколько дневного лимита уже использовано; черта — порог, после которого платежи уходят на следующий аккаунт.'),
+    accounts.length ? h('div', { class: 'accs' }, accounts.map((a) => accountCard(a)))
+      : h('p', { class: 'note' }, 'Аккаунтов пока нет.'),
+    can('admin') ? newAccountForm() : null));
 }
 
 function accountCard(a) {
@@ -238,7 +343,7 @@ function accountCard(a) {
   const fill = (used + res) / cap, mark = a.switch_at_bps / 100;
   const lvl = fill * 100 >= mark ? 'full' : fill >= 0.75 ? 'warn' : 'ok';
   const status = !a.enabled ? h('span', { class: 'pill m' }, 'выключен')
-    : lvl === 'full' ? h('span', { class: 'pill bad' }, 'лимит на сегодня')
+    : lvl === 'full' ? h('span', { class: 'pill bad' }, 'лимит на сегодня исчерпан')
     : lvl === 'warn' ? h('span', { class: 'pill warn' }, 'близко к лимиту') : h('span', { class: 'pill ok' }, 'активен');
 
   const card = h('div', { class: `acc ${a.enabled ? '' : 'off'}`, 'data-lvl': lvl },
@@ -247,14 +352,14 @@ function accountCard(a) {
       h('i', { class: 'u', style: `width:${Math.min(100, (used / cap) * 100)}%` }),
       h('i', { class: 'r', style: `width:${Math.min(100, (res / cap) * 100)}%` }),
       h('span', { class: 'mark', style: `left:${mark}%` })),
-    h('div', { class: 'nums' }, h('span', null, h('b', null, money(a.used_today)), ' / ', money(a.daily_cap)), h('span', null, `${(fill * 100).toFixed(1)}%`)),
+    h('div', { class: 'nums' }, h('span', null, 'сегодня ', h('b', null, money(a.used_today)), ' из ', money(a.daily_cap)), h('span', null, `${(fill * 100).toFixed(1)}%`)),
     h('div', { class: 'meta' },
-      h('span', null, 'В резерве'), h('span', null, money(a.reserved_today)),
-      h('span', null, 'Платёж'), h('span', null, `${money(a.min_amount)} – ${money(a.max_amount)}`),
-      h('span', null, 'Месячный'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'без лимита'),
-      h('span', null, 'Комиссия'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
+      h('span', null, 'Ждут оплаты'), h('span', null, money(a.reserved_today)),
+      h('span', null, 'Сумма платежа'), h('span', null, `${money(a.min_amount)} – ${money(a.max_amount)}`),
+      h('span', null, 'Лимит в месяц'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'нет'),
+      h('span', null, 'Комиссия провайдера'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
       h('span', null, 'Приоритет'), h('span', null, a.priority),
-      h('span', null, 'Порог'), h('span', null, `${mark}%`)),
+      h('span', null, 'Переключать на'), h('span', null, `${mark}% лимита`)),
     h('div', { class: 'tags' }, a.currencies.map((c) => h('span', { class: 'tag' }, c)), a.countries.map((c) => h('span', { class: 'tag' }, c))));
 
   if (can('operator')) {
@@ -347,7 +452,8 @@ async function viewPayments(main) {
       : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
 
   main.replaceChildren(h('div', { class: 'grid2' },
-    h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter), h('div', { class: 'tbl' }, table)),
+    h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter),
+      h('p', { class: 'note' }, 'Нажми на платёж, чтобы увидеть, через какие аккаунты он шёл и почему.'), h('div', { class: 'tbl' }, table)),
     h('section', { class: 'panel' }, detail)));
   if (state.cache.selTx) await showTx(detail, state.cache.selTx);
   else detail.append(h('p', { class: 'note' }, 'Выбери платёж слева: здесь будет его путь по аккаунтам, проводки и вебхуки.'));
@@ -390,7 +496,7 @@ function viewSandbox(main) {
   renderMade();
 
   main.replaceChildren(h('section', { class: 'panel' },
-    h('h2', null, 'Тестовый депозит'),
+    h('h2', null, 'Тестовый платёж'),
     h('p', { class: 'note' }, 'Запрос уходит в тот же публичный API, что используют сайты (POST /v1/deposits), с ключом сайта. Ключ хранится только в этой вкладке до перезагрузки.'),
     actionForm({ class: 'form' }, [
       field('API-ключ сайта', h('input', { name: 'key', required: true, value: sb.key, placeholder: 'ftk_…', autocomplete: 'off' }), 'full'),
@@ -426,7 +532,7 @@ async function viewIssues(main) {
   const rows = await api('GET', `/admin/v1/issues${all ? '?all=true' : ''}`);
   const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером' };
   main.replaceChildren(h('section', { class: 'panel' },
-    h('div', { class: 'row' }, h('h2', null, 'Расхождения'),
+    h('div', { class: 'row' }, h('h2', null, 'Проблемы с платежами'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.issuesAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),
     h('p', { class: 'note' }, 'Ситуации, которые система не решает сама. Например, провайдер подтвердил оплату по попытке, которую мы уже закрыли отказом: деньги пришли, а платёж ушёл дальше. Проверь у провайдера и реши вручную.'),
     rows.length ? h('div', { class: 'tbl' }, h('table', null,
@@ -501,10 +607,18 @@ async function viewSetup(main) {
   const [ops, provs] = await Promise.all([api('GET', '/admin/v1/operators'), api('GET', '/admin/v1/providers')]);
   main.replaceChildren(h('div', { class: 'grid2' },
     h('section', { class: 'panel' },
-      h('h2', null, 'Операторы (лицензии)'),
-      h('table', null, h('thead', null, h('tr', null, ['Название', 'Страны лицензии', 'KYC выше', 'Попыток'].map((t) => h('th', null, t)))),
+      h('h2', null, 'Операторы'),
+      h('p', { class: 'note' }, 'Оператор — владелец лицензии, под которым работают сайты. Комиссия платформы — твой процент с каждого успешного депозита: из неё считается «Заработали» на Обзоре.'),
+      h('div', { class: 'tbl' }, h('table', null, h('thead', null, h('tr', null, ['Название', 'Страны лицензии', 'KYC выше', 'Комиссия платформы'].map((t) => h('th', null, t)))),
         h('tbody', null, ops.map((o) => h('tr', null, h('td', null, o.name), h('td', null, h('div', { class: 'tags' }, o.licenses.map((c) => h('span', { class: 'tag' }, c)))),
-          h('td', { class: 'n' }, o.kyc_required_above ? money(o.kyc_required_above) : '—'), h('td', { class: 'n' }, o.max_attempts))))),
+          h('td', { class: 'n' }, o.kyc_required_above ? money(o.kyc_required_above) : '—'),
+          h('td', null, actionForm({ class: 'row start' }, [
+            h('input', { name: 'fee', type: 'number', min: 0, max: 100, step: 0.01, value: o.platform_fee_bps / 100, style: 'width:80px', 'aria-label': `Комиссия платформы для ${o.name}, %` }),
+            h('span', { class: 'note' }, '%'), h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
+          ], async (v) => {
+            await api('PATCH', `/admin/v1/operators/${o.id}`, { platformFeeBps: Math.round(Number(v.fee) * 100) });
+            return h('div', { class: 'msg ok' }, 'Сохранено. Новый процент применяется к следующим успешным депозитам.');
+          }))))))),
       actionForm({ class: 'form' }, [
         field('Название', h('input', { name: 'name', required: true })),
         field('Страны лицензии', h('input', { name: 'licenses', required: true, placeholder: 'MT, DE, IE' })),
@@ -533,7 +647,8 @@ async function viewUsers(main) {
   const users = await api('GET', '/admin/v1/users');
   const shown = h('div');
   main.replaceChildren(h('section', { class: 'panel' },
-    h('h2', null, 'Пользователи борды'),
+    h('h2', null, 'Команда'),
+    h('p', { class: 'note' }, 'viewer — только смотрит; operator — ещё включает аккаунты, меняет лимиты и разбирает проблемы; admin — всё.'),
     h('div', { class: 'tbl' }, h('table', null,
       h('thead', null, h('tr', null, ['Email', 'Роль', '2FA', 'Последний вход', ''].map((t) => h('th', null, t)))),
       h('tbody', null, users.map((u) => {
@@ -591,7 +706,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);

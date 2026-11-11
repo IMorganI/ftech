@@ -57,24 +57,99 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
     return r;
   });
 
+  // ---------- статистика для «Обзора» ----------
+  // Период считается в часовом поясе того, кто смотрит: «сегодня» в Киеве и в UTC — разные сутки.
+
+  app.get('/admin/v1/stats', viewer, async (req, reply) => {
+    const q = parse(z.object({
+      period: z.enum(['today', '7d', '30d']).default('7d'),
+      tz: z.string().regex(/^[A-Za-z0-9_+\-/]{1,64}$/).default('UTC'),
+    }), req.query, reply);
+    if (!q) return;
+    const days = { today: 1, '7d': 7, '30d': 30 }[q.period];
+    // Названия поясов меняются (Europe/Kiev → Europe/Kyiv), а база может знать только одно из них.
+    const ALIASES: Record<string, string[]> = { 'Europe/Kyiv': ['Europe/Kiev'], 'Europe/Kiev': ['Europe/Kyiv'], 'Asia/Calcutta': ['Asia/Kolkata'], 'Asia/Kolkata': ['Asia/Calcutta'] };
+    const known = (await pool.query(`SELECT name FROM pg_timezone_names WHERE name = ANY($1::text[])`,
+      [[q.tz, ...(ALIASES[q.tz] ?? [])]])).rows.map((r) => r.name as string);
+    const tz = known.includes(q.tz) ? q.tz : known[0] ?? 'UTC';
+    const unit = q.period === 'today' ? 'hour' : 'day';
+    return withTransaction(pool, async (c) => {
+        // Начало периода в часовом поясе зрителя, переведённое в абсолютное время.
+        const from = (await c.query(
+          `SELECT (date_trunc('day', now() AT TIME ZONE $1) - make_interval(days => $2 - 1)) AT TIME ZONE $1 AS from`,
+          [tz, days])).rows[0].from;
+
+        const totals = (await c.query(
+          `SELECT currency,
+             count(*)::int AS attempts,
+             count(*) FILTER (WHERE status = 'success')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'declined')::int AS declined,
+             count(*) FILTER (WHERE status = 'pending')::int AS pending,
+             coalesce(sum(amount) FILTER (WHERE status = 'success'), 0) AS volume,
+             coalesce(sum(platform_fee) FILTER (WHERE status = 'success'), 0) AS earned,
+             coalesce(sum(provider_fee) FILTER (WHERE status = 'success'), 0) AS provider_cost
+           FROM transactions WHERE type = 'deposit' AND created_at >= $1
+           GROUP BY currency ORDER BY volume DESC`, [from])).rows;
+
+        const series = (await c.query(
+          `WITH b AS (
+             SELECT generate_series(date_trunc($3, $1::timestamptz AT TIME ZONE $2), date_trunc($3, now() AT TIME ZONE $2),
+                                    CASE WHEN $3 = 'hour' THEN interval '1 hour' ELSE interval '1 day' END) AS bucket),
+           counts AS (
+             SELECT date_trunc($3, created_at AT TIME ZONE $2) AS bucket,
+               count(*) FILTER (WHERE status = 'success')::int AS succeeded,
+               count(*) FILTER (WHERE status = 'declined')::int AS declined
+             FROM transactions WHERE type = 'deposit' AND created_at >= $1 GROUP BY 1),
+           vol AS (
+             SELECT bucket, json_object_agg(currency, total) AS volume FROM (
+               SELECT date_trunc($3, created_at AT TIME ZONE $2) AS bucket, currency, sum(amount)::text AS total
+               FROM transactions WHERE type = 'deposit' AND status = 'success' AND created_at >= $1 GROUP BY 1, 2) v
+             GROUP BY bucket)
+           SELECT to_char(b.bucket, 'YYYY-MM-DD"T"HH24:MI') AS bucket,
+             coalesce(c.succeeded, 0) AS succeeded, coalesce(c.declined, 0) AS declined, coalesce(v.volume, '{}') AS volume
+           FROM b LEFT JOIN counts c USING (bucket) LEFT JOIN vol v USING (bucket)
+           ORDER BY b.bucket`, [from, tz, unit])).rows;
+
+        const bySite = (await c.query(
+          `SELECT s.name AS site, t.currency,
+             count(*) FILTER (WHERE t.status = 'success')::int AS succeeded,
+             count(*)::int AS attempts,
+             coalesce(sum(t.amount) FILTER (WHERE t.status = 'success'), 0) AS volume,
+             coalesce(sum(t.platform_fee) FILTER (WHERE t.status = 'success'), 0) AS earned
+           FROM transactions t JOIN sites s ON s.id = t.site_id
+           WHERE t.type = 'deposit' AND t.created_at >= $1
+           GROUP BY s.name, t.currency ORDER BY volume DESC`, [from])).rows;
+
+        const recent = (await c.query(
+          `SELECT t.id, t.status, t.amount, t.currency, t.decline_code, t.created_at, s.name AS site, p.external_id AS player
+           FROM transactions t JOIN sites s ON s.id = t.site_id JOIN players p ON p.id = t.player_id
+           WHERE t.type = 'deposit' ORDER BY t.created_at DESC LIMIT 8`)).rows;
+
+        const fees = (await c.query(`SELECT min(platform_fee_bps) AS min, max(platform_fee_bps) AS max FROM operators`)).rows[0];
+
+        return plain({ period: q.period, unit, tz, from, totals, series, bySite, recent, platformFeeBps: fees });
+    });
+  });
+
   // ---------- операторы ----------
 
   app.get('/admin/v1/operators', viewer, async () =>
-    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, created_at FROM operators ORDER BY name`)).rows));
+    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, platform_fee_bps, created_at FROM operators ORDER BY name`)).rows));
 
   const operatorBody = z.object({
     name: z.string().min(1).max(200),
     licenses: z.array(country).max(250),
     kycRequiredAbove: money.nullable(),
     maxAttempts: z.number().int().min(1).max(10),
+    platformFeeBps: z.number().int().min(0).max(10000),
   });
 
   app.post('/admin/v1/operators', admin, async (req, reply) => {
-    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true }), req.body, reply);
+    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true, platformFeeBps: true }), req.body, reply);
     if (!b) return;
     const row = (await pool.query(
-      `INSERT INTO operators (name, licenses, kyc_required_above, max_attempts) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [b.name, b.licenses, b.kycRequiredAbove ?? null, b.maxAttempts ?? 3])).rows[0];
+      `INSERT INTO operators (name, licenses, kyc_required_above, max_attempts, platform_fee_bps) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [b.name, b.licenses, b.kycRequiredAbove ?? null, b.maxAttempts ?? 3, b.platformFeeBps ?? 0])).rows[0];
     await audit(pool, { ...who(req), action: 'operator.create', entity: 'operator', entityId: row.id, after: row });
     return reply.code(201).send(plain(row));
   });
@@ -90,8 +165,8 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
       const after = (await c.query(
         `UPDATE operators SET name = coalesce($2, name), licenses = coalesce($3, licenses),
            kyc_required_above = CASE WHEN $4::boolean THEN $5 ELSE kyc_required_above END,
-           max_attempts = coalesce($6, max_attempts) WHERE id = $1 RETURNING *`,
-        [id.data, b.name ?? null, b.licenses ?? null, b.kycRequiredAbove !== undefined, b.kycRequiredAbove ?? null, b.maxAttempts ?? null])).rows[0];
+           max_attempts = coalesce($6, max_attempts), platform_fee_bps = coalesce($7, platform_fee_bps) WHERE id = $1 RETURNING *`,
+        [id.data, b.name ?? null, b.licenses ?? null, b.kycRequiredAbove !== undefined, b.kycRequiredAbove ?? null, b.maxAttempts ?? null, b.platformFeeBps ?? null])).rows[0];
       await audit(c, { ...who(req), action: 'operator.update', entity: 'operator', entityId: id.data, before, after });
       return plain(after);
     });

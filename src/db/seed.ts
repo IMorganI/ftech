@@ -14,7 +14,7 @@ try {
     console.log('В базе уже есть данные — сид пропущен.');
   } else {
     const op = (await pool.query(
-      `INSERT INTO operators (name, licenses, kyc_required_above) VALUES ('Demo Operator', '{MT,DE,IE,BR,CA}', 30000) RETURNING id`,
+      `INSERT INTO operators (name, licenses, kyc_required_above, platform_fee_bps) VALUES ('Demo Operator', '{MT,DE,IE,BR,CA}', 30000, 150) RETURNING id`,
     )).rows[0].id;
     const { key, hash } = generateApiKey();
     const webhookSecret = randomSecret('whsec_');
