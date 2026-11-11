@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Минимальные права: CI только читает код и ничего не может изменить в репозитории.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ftech
+          POSTGRES_PASSWORD: ftech
+          POSTGRES_DB: ftech_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ftech" --health-interval 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://ftech:ftech@localhost:5432/ftech_test
+    steps:
+      # Actions закреплены по хэшу коммита: подмена тега у стороннего action на нас не повлияет.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Проверка зависимостей на уязвимости
+        run: npm audit --audit-level=high
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
