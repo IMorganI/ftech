@@ -4,6 +4,7 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL не задан'),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
+  RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(600),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });
 
