@@ -4,7 +4,7 @@ import { buildApp } from './app.js';
 
 const config = loadConfig();
 const pool = createPool(config.DATABASE_URL);
-const app = buildApp({ pool, logLevel: config.LOG_LEVEL });
+const app = buildApp({ pool, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE });
 
 const shutdown = async () => {
   await app.close();
