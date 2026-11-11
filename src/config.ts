@@ -8,6 +8,8 @@ const schema = z.object({
   HOST: z.string().default('0.0.0.0'),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(600),
   MOCK_PROVIDER_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // За балансировщиком/прокси (Codespaces, облако): брать IP клиента из X-Forwarded-For.
+  TRUST_PROXY: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   WORKERS_ENABLED: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 });

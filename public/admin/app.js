@@ -1,0 +1,600 @@
+/* Борда ftech. Без сборки и зависимостей: DOM строится через h() и текстовые узлы, HTML-строки не вставляются никогда — данные из базы не могут внедрить разметку. */
+'use strict';
+
+// ---------- утилиты ----------
+
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'class') el.className = v;
+    else if (k === 'value') el.value = v;
+    else if (k === 'style') el.style.cssText = v; // через CSSOM: строгий CSP запрещает style-атрибуты, но не CSSOM
+    else if (v === true) el.setAttribute(k, '');
+    else el.setAttribute(k, String(v));
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+
+async function api(method, path, body) {
+  const opts = { method, credentials: 'same-origin', headers: {} };
+  if (method !== 'GET') { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body ?? {}); }
+  const res = await fetch(path, opts);
+  let data = null;
+  try { data = await res.json(); } catch { /* пустой ответ */ }
+  if (!res.ok) {
+    const err = new Error(data?.error?.message || `Ошибка ${res.status}`);
+    err.status = res.status; err.code = data?.error?.code; err.details = data?.error?.details;
+    throw err;
+  }
+  return data;
+}
+
+/** Центы (строка/число) → «1 234.56» */
+function money(cents, currency) {
+  if (cents === null || cents === undefined) return '—';
+  const n = BigInt(cents);
+  const neg = n < 0n; const a = neg ? -n : n;
+  const whole = (a / 100n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const s = `${neg ? '−' : ''}${whole}.${(a % 100n).toString().padStart(2, '0')}`;
+  return currency ? `${s} ${currency}` : s;
+}
+/** «12.50» → '1250' (центы строкой) */
+function toCents(text) {
+  const t = String(text).trim().replace(/\s/g, '').replace(',', '.');
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  const [w, f = ''] = t.split('.');
+  const c = BigInt(w) * 100n + BigInt((f + '00').slice(0, 2));
+  return c > 0n ? c.toString() : null;
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
+const list = (s) => String(s).split(/[,\s]+/).map((x) => x.trim().toUpperCase()).filter(Boolean);
+
+const STATUS = {
+  success: ['ok', 'Успех'], pending: ['n', 'Ожидает'], declined: ['bad', 'Отказ'], failed: ['bad', 'Ошибка'], created: ['m', 'Создан'],
+};
+const pill = (status) => { const [c, t] = STATUS[status] || ['m', status]; return h('span', { class: `pill ${c}` }, t); };
+const DECLINE = {
+  player_self_excluded: 'самоисключение', country_not_licensed: 'страна вне лицензии', kyc_rejected: 'KYC отклонён',
+  kyc_required: 'нужен KYC', player_limit_exceeded: 'лимит игрока', no_route: 'нет маршрута', all_attempts_failed: 'отказ провайдеров',
+};
+
+function errorBox(err) {
+  const details = (err.details || []).map((d) => `${d.path}: ${d.message}`).join('; ');
+  return h('div', { class: 'msg err', role: 'alert' }, err.message, details ? ` (${details})` : '');
+}
+function field(label, input, cls) { return h('label', { class: cls }, label, input); }
+function formValues(form) {
+  const out = {};
+  for (const el of form.querySelectorAll('[name]')) out[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  return out;
+}
+
+/** Форма с обработкой ошибок: onSubmit(values) → Promise; результат/ошибка показываются под формой. */
+function actionForm(attrs, children, onSubmit) {
+  const out = h('div');
+  const form = h('form', { ...attrs, onsubmit: async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('button[type=submit]');
+    btn && (btn.disabled = true);
+    out.replaceChildren();
+    try { const r = await onSubmit(formValues(form), form); if (r instanceof Node) out.append(r); }
+    catch (err) { if (!handleAuthError(err)) out.append(errorBox(err)); }
+    finally { btn && (btn.disabled = false); }
+  } }, children);
+  return h('div', { class: 'stack' }, form, out);
+}
+
+/** Блок «показывается один раз» — для ключей и паролей. */
+function shownOnce(title, pairs) {
+  return h('div', { class: 'once' },
+    h('b', null, title),
+    h('div', { class: 'note' }, 'Скопируй сейчас: после обновления страницы это больше не покажется.'),
+    pairs.map(([label, value]) => [
+      h('div', { class: 'note' }, label),
+      h('code', null, value),
+      h('button', { class: 'sm', type: 'button', onclick: async (e) => {
+        try { await navigator.clipboard.writeText(value); e.target.textContent = 'Скопировано'; }
+        catch { e.target.textContent = 'Выдели и скопируй вручную'; }
+      } }, 'Копировать'),
+    ]));
+}
+
+// ---------- состояние ----------
+
+const state = { me: null, tab: 'overview', timer: null, cache: {} };
+const root = document.getElementById('root');
+const can = (role) => ({ viewer: 1, operator: 2, admin: 3 })[state.me?.role] >= ({ viewer: 1, operator: 2, admin: 3 })[role];
+
+function handleAuthError(err) {
+  if (err.status === 401) { state.me = null; showLogin('Сессия истекла, войдите снова'); return true; }
+  if (err.code === 'password_change_required') { showChangePassword(); return true; }
+  return false;
+}
+
+// ---------- вход ----------
+
+function authScreen(title, ...body) {
+  clearInterval(state.timer);
+  root.replaceChildren(h('div', { class: 'auth' }, h('div', { class: 'brand' }, 'ftech · борда'), h('h1', null, title), body));
+}
+
+function showLogin(notice) {
+  authScreen('Вход',
+    notice ? h('div', { class: 'msg err' }, notice) : null,
+    actionForm({ class: 'panel' }, [
+      field('Email', h('input', { name: 'email', type: 'email', autocomplete: 'username', required: true, id: 'login-email' })),
+      field('Пароль', h('input', { name: 'password', type: 'password', autocomplete: 'current-password', required: true, id: 'login-password' })),
+      h('button', { class: 'primary', type: 'submit' }, 'Продолжить'),
+    ], async (v) => {
+      const r = await api('POST', '/admin/v1/auth/login', v);
+      if (r.next === 'totp_setup') showTotp(r); else showTotp(null);
+    }));
+  document.getElementById('login-email')?.focus();
+}
+
+function showTotp(setup) {
+  authScreen(setup ? 'Настройка 2FA' : 'Код подтверждения',
+    setup ? h('div', { class: 'panel' },
+      h('p', { style: null }, 'Отсканируй QR-код в Google Authenticator, 1Password или Authy. Без этого войти будет нельзя.'),
+      h('img', { class: 'qr', alt: 'QR-код для приложения-аутентификатора', src: 'data:image/svg+xml;utf8,' + encodeURIComponent(setup.qrSvg) }),
+      h('div', { class: 'note' }, 'Или введи ключ вручную:'),
+      h('div', { class: 'secret' }, setup.totpSecret)) : null,
+    actionForm({ class: 'panel' }, [
+      field('6 цифр из приложения', h('input', { name: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', pattern: '\\d{6}', maxlength: 6, required: true, id: 'totp-code' })),
+      h('button', { class: 'primary', type: 'submit' }, 'Подтвердить'),
+    ], async (v) => {
+      const r = await api('POST', '/admin/v1/auth/totp', { code: v.code.trim() });
+      if (r.next === 'change_password') showChangePassword(); else boot();
+    }),
+    h('button', { class: 'link', type: 'button', onclick: () => showLogin() }, '← Назад'));
+  document.getElementById('totp-code')?.focus();
+}
+
+function showChangePassword() {
+  authScreen('Смена временного пароля',
+    h('p', { class: 'note' }, 'Минимум 12 символов, буквы и цифры. Удобно — фраза из нескольких слов с числом.'),
+    actionForm({ class: 'panel' }, [
+      field('Текущий (временный) пароль', h('input', { name: 'currentPassword', type: 'password', autocomplete: 'current-password', required: true })),
+      field('Новый пароль', h('input', { name: 'newPassword', type: 'password', autocomplete: 'new-password', minlength: 12, required: true })),
+      h('button', { class: 'primary', type: 'submit' }, 'Сменить пароль'),
+    ], async (v) => { await api('POST', '/admin/v1/me/password', v); boot(); }));
+}
+
+// ---------- каркас ----------
+
+const TABS = [
+  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['sandbox', 'Песочница', 'viewer'],
+  ['issues', 'Расхождения', 'viewer'], ['sites', 'Сайты', 'admin'], ['setup', 'Операторы и провайдеры', 'admin'],
+  ['users', 'Пользователи', 'admin'], ['audit', 'Журнал', 'admin'],
+];
+
+async function boot() {
+  try {
+    state.me = await api('GET', '/admin/v1/me');
+    if (state.me.mustChangePassword) return showChangePassword();
+    const fromHash = location.hash.slice(1);
+    if (TABS.some(([id, , role]) => id === fromHash && can(role))) state.tab = fromHash;
+    renderShell();
+  } catch (err) {
+    if (err.status === 401) showLogin(); else root.replaceChildren(errorBox(err));
+  }
+}
+
+function renderShell() {
+  const nav = h('nav', { class: 'tabs', 'aria-label': 'Разделы' },
+    TABS.filter(([, , role]) => can(role)).map(([id, label]) =>
+      h('button', { class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => { state.tab = id; location.hash = id; renderShell(); } }, label)));
+  const main = h('main', { id: 'main' });
+  root.replaceChildren(
+    h('header', { class: 'top' },
+      h('span', { class: 'brand' }, 'ftech'), nav,
+      h('div', { class: 'who' }, `${state.me.email} · ${state.me.role}`,
+        h('button', { class: 'sm', onclick: async () => { await api('POST', '/admin/v1/auth/logout').catch(() => {}); state.me = null; showLogin(); } }, 'Выйти'))),
+    main);
+  clearInterval(state.timer);
+  const view = VIEWS[state.tab];
+  const run = async () => {
+    try { await view(main); }
+    catch (err) { if (!handleAuthError(err)) main.replaceChildren(errorBox(err)); }
+  };
+  run();
+  // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
+  if (['overview', 'payments', 'issues'].includes(state.tab)) {
+    state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
+  }
+}
+
+// ---------- обзор и аккаунты ----------
+
+async function viewOverview(main) {
+  const [o, accounts] = await Promise.all([api('GET', '/admin/v1/overview'), api('GET', '/admin/v1/accounts')]);
+  const rate = o.tx_24h ? Math.round((o.success_24h / o.tx_24h) * 100) + '%' : '—';
+  const volume = Object.entries(o.volume_24h || {}).map(([c, v]) => money(v, c)).join(' · ') || '0';
+  const stat = (value, label, alert) => h('div', { class: `stat ${alert ? 'alert' : ''}` }, h('b', null, value), h('span', null, label));
+
+  const keepOpen = state.cache.editing;
+  main.replaceChildren(
+    h('section', { class: 'panel' },
+      h('h2', null, 'За 24 часа'),
+      h('div', { class: 'stats' },
+        stat(o.tx_24h, 'платежей'), stat(rate, 'успешных'), stat(volume, 'оборот'),
+        stat(o.pending, 'ожидают оплаты'), stat(o.open_issues, 'открытых расхождений', o.open_issues > 0),
+        stat(o.failed_webhooks, 'недоставленных вебхуков', o.failed_webhooks > 0))),
+    h('section', { class: 'panel' },
+      h('div', { class: 'row' }, h('h2', null, 'Мерчант-аккаунты'), h('span', { class: 'note' }, 'шкала — оборот за сегодня; черта — порог переключения')),
+      accounts.length ? h('div', { class: 'accs' }, accounts.map((a) => accountCard(a, keepOpen === a.id)))
+        : h('p', { class: 'note' }, 'Аккаунтов пока нет.'),
+      can('admin') ? newAccountForm() : null));
+}
+
+function accountCard(a) {
+  const cap = Number(a.daily_cap), used = Number(a.used_today), res = Number(a.reserved_today);
+  const fill = (used + res) / cap, mark = a.switch_at_bps / 100;
+  const lvl = fill * 100 >= mark ? 'full' : fill >= 0.75 ? 'warn' : 'ok';
+  const status = !a.enabled ? h('span', { class: 'pill m' }, 'выключен')
+    : lvl === 'full' ? h('span', { class: 'pill bad' }, 'лимит на сегодня')
+    : lvl === 'warn' ? h('span', { class: 'pill warn' }, 'близко к лимиту') : h('span', { class: 'pill ok' }, 'активен');
+
+  const card = h('div', { class: `acc ${a.enabled ? '' : 'off'}`, 'data-lvl': lvl },
+    h('div', { class: 'row' }, h('div', null, h('div', { class: 'name' }, a.name), h('div', { class: 'prov' }, a.provider_code)), status),
+    h('div', { class: 'bar', role: 'img', 'aria-label': `Заполнено ${Math.round(fill * 100)}%` },
+      h('i', { class: 'u', style: `width:${Math.min(100, (used / cap) * 100)}%` }),
+      h('i', { class: 'r', style: `width:${Math.min(100, (res / cap) * 100)}%` }),
+      h('span', { class: 'mark', style: `left:${mark}%` })),
+    h('div', { class: 'nums' }, h('span', null, h('b', null, money(a.used_today)), ' / ', money(a.daily_cap)), h('span', null, `${(fill * 100).toFixed(1)}%`)),
+    h('div', { class: 'meta' },
+      h('span', null, 'В резерве'), h('span', null, money(a.reserved_today)),
+      h('span', null, 'Платёж'), h('span', null, `${money(a.min_amount)} – ${money(a.max_amount)}`),
+      h('span', null, 'Месячный'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'без лимита'),
+      h('span', null, 'Комиссия'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
+      h('span', null, 'Приоритет'), h('span', null, a.priority),
+      h('span', null, 'Порог'), h('span', null, `${mark}%`)),
+    h('div', { class: 'tags' }, a.currencies.map((c) => h('span', { class: 'tag' }, c)), a.countries.map((c) => h('span', { class: 'tag' }, c))));
+
+  if (can('operator')) {
+    const result = h('div');
+    const toggle = h('button', { class: 'sm', onclick: async () => {
+      try { await api('PATCH', `/admin/v1/accounts/${a.id}`, { enabled: !a.enabled }); renderShell(); }
+      catch (err) { if (!handleAuthError(err)) result.replaceChildren(errorBox(err)); }
+    } }, a.enabled ? 'Выключить' : 'Включить');
+    const editBtn = h('button', { class: 'sm', onclick: () => {
+      state.cache.editing = a.id; clearInterval(state.timer);
+      const ed = actionForm({ class: 'edit' }, [
+        field('Дневной лимит', h('input', { name: 'dailyCap', value: (Number(a.daily_cap) / 100).toFixed(2), inputmode: 'decimal' })),
+        field('Месячный (пусто — без)', h('input', { name: 'monthlyCap', value: a.monthly_cap ? (Number(a.monthly_cap) / 100).toFixed(2) : '', inputmode: 'decimal' })),
+        field('Порог, %', h('input', { name: 'switchAt', value: a.switch_at_bps / 100, type: 'number', min: 1, max: 100, step: 0.01 })),
+        field('Комиссия, %', h('input', { name: 'fee', value: a.fee_bps / 100, type: 'number', min: 0, max: 100, step: 0.01 })),
+        field('Приоритет', h('input', { name: 'priority', value: a.priority, type: 'number', min: -1000, max: 1000 })),
+        h('div', { class: 'row start' }, h('button', { class: 'primary sm', type: 'submit' }, 'Сохранить'),
+          h('button', { class: 'sm', type: 'button', onclick: () => { state.cache.editing = null; renderShell(); } }, 'Отмена')),
+      ], async (v) => {
+        const dailyCap = toCents(v.dailyCap);
+        if (!dailyCap) throw new Error('Дневной лимит — сумма больше нуля, например 5000 или 5000.50');
+        const monthlyCap = v.monthlyCap.trim() ? toCents(v.monthlyCap) : null;
+        if (v.monthlyCap.trim() && !monthlyCap) throw new Error('Месячный лимит — сумма больше нуля или пусто');
+        await api('PATCH', `/admin/v1/accounts/${a.id}`, {
+          dailyCap, monthlyCap, switchAtBps: Math.round(Number(v.switchAt) * 100), feeBps: Math.round(Number(v.fee) * 100), priority: Number(v.priority),
+        });
+        state.cache.editing = null; renderShell();
+      });
+      editBtn.replaceWith(ed);
+    } }, 'Лимиты');
+    card.append(h('div', { class: 'row start' }, toggle, editBtn), result);
+  }
+  return card;
+}
+
+function newAccountForm() {
+  const opSel = h('select', { name: 'operatorId', required: true });
+  const provSel = h('select', { name: 'providerId', required: true });
+  Promise.all([api('GET', '/admin/v1/operators'), api('GET', '/admin/v1/providers')]).then(([ops, provs]) => {
+    opSel.replaceChildren(...ops.map((o) => h('option', { value: o.id }, o.name)));
+    provSel.replaceChildren(...provs.map((p) => h('option', { value: p.id }, `${p.name} (${p.code})`)));
+  }).catch(() => {});
+  return h('details', { ontoggle: (e) => { state.cache.editing = e.target.open ? 'new' : null; if (e.target.open) clearInterval(state.timer); } },
+    h('summary', null, '+ Новый аккаунт'),
+    actionForm({ class: 'form', style: 'margin-top:12px' }, [
+      field('Оператор', opSel), field('Провайдер', provSel),
+      field('Название', h('input', { name: 'name', required: true, placeholder: 'A · EUR-3' })),
+      field('Валюты', h('input', { name: 'currencies', required: true, placeholder: 'EUR, USD' })),
+      field('Страны', h('input', { name: 'countries', required: true, placeholder: 'MT, DE' }), 'wide'),
+      field('Мин. платёж', h('input', { name: 'min', required: true, value: '10', inputmode: 'decimal' })),
+      field('Макс. платёж', h('input', { name: 'max', required: true, value: '2000', inputmode: 'decimal' })),
+      field('Дневной лимит', h('input', { name: 'cap', required: true, value: '5000', inputmode: 'decimal' })),
+      field('Комиссия, %', h('input', { name: 'fee', type: 'number', value: '2.5', step: 0.01, min: 0 })),
+      field('Ссылка на секрет', h('input', { name: 'credentialsRef', value: 'MOCK', placeholder: 'MOCK' })),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
+    ], async (v) => {
+      const [min, max, cap] = [toCents(v.min), toCents(v.max), toCents(v.cap)];
+      if (!min || !max || !cap) throw new Error('Суммы — числа больше нуля');
+      await api('POST', '/admin/v1/accounts', {
+        operatorId: v.operatorId, providerId: v.providerId, name: v.name, currencies: list(v.currencies), countries: list(v.countries),
+        minAmount: min, maxAmount: max, dailyCap: cap, feeBps: Math.round(Number(v.fee) * 100), credentialsRef: v.credentialsRef.trim() || null,
+      });
+      state.cache.editing = null; renderShell();
+    }));
+}
+
+// ---------- платежи ----------
+
+async function viewPayments(main) {
+  const f = state.cache.payFilter || (state.cache.payFilter = { status: '', player: '' });
+  const qs = new URLSearchParams({ limit: '100', ...(f.status ? { status: f.status } : {}), ...(f.player ? { player: f.player } : {}) });
+  const rows = await api('GET', `/admin/v1/transactions?${qs}`);
+  const detail = h('div', { id: 'tx-detail' });
+
+  const filter = h('form', { class: 'row start', onsubmit: (e) => { e.preventDefault(); Object.assign(f, formValues(e.target)); renderShell(); } },
+    h('select', { name: 'status', style: 'width:auto', 'aria-label': 'Статус' },
+      [['', 'Все статусы'], ['pending', 'Ожидают'], ['success', 'Успешные'], ['declined', 'Отказы']].map(([v, t]) => h('option', { value: v, selected: f.status === v }, t))),
+    h('input', { name: 'player', placeholder: 'ID игрока', value: f.player, style: 'width:180px', 'aria-label': 'ID игрока' }),
+    h('button', { type: 'submit' }, 'Показать'));
+
+  const table = h('table', null,
+    h('thead', null, h('tr', null, ['Время', 'Сайт', 'Игрок', 'Сумма', 'Статус', 'Аккаунт', 'Попыток'].map((t) => h('th', null, t)))),
+    h('tbody', null, rows.length ? rows.map((t) => h('tr', { class: `click ${state.cache.selTx === t.id ? 'sel' : ''}`, tabindex: 0,
+      onclick: () => { state.cache.selTx = t.id; showTx(detail, t.id); main.querySelectorAll('tr.sel').forEach((r) => r.classList.remove('sel')); },
+      onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
+      h('td', { class: 'n' }, when(t.created_at)), h('td', null, t.site), h('td', { class: 'n' }, `${t.player} · ${t.country}`),
+      h('td', { class: 'n' }, money(t.amount, t.currency)),
+      h('td', null, pill(t.status), t.decline_code ? h('div', { class: 'note' }, DECLINE[t.decline_code] || t.decline_code) : null),
+      h('td', { class: 'dim' }, t.account || '—'), h('td', { class: 'n' }, t.attempts)))
+      : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
+
+  main.replaceChildren(h('div', { class: 'grid2' },
+    h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter), h('div', { class: 'tbl' }, table)),
+    h('section', { class: 'panel' }, detail)));
+  if (state.cache.selTx) await showTx(detail, state.cache.selTx);
+  else detail.append(h('p', { class: 'note' }, 'Выбери платёж слева: здесь будет его путь по аккаунтам, проводки и вебхуки.'));
+}
+
+async function showTx(box, id) {
+  const t = await api('GET', `/admin/v1/transactions/${id}`);
+  box.replaceChildren(
+    h('div', { class: 'row' }, h('h3', null, money(t.amount, t.currency)), pill(t.status)),
+    h('div', { class: 'meta' },
+      h('span', null, 'ID'), h('span', null, t.id), h('span', null, 'Сайт'), h('span', null, t.site),
+      h('span', null, 'Игрок'), h('span', null, `${t.player} · ${t.country}`), h('span', null, 'Создан'), h('span', null, when(t.created_at)),
+      t.decline_code ? [h('span', null, 'Причина отказа'), h('span', null, DECLINE[t.decline_code] || t.decline_code)] : null),
+    h('h2', null, 'Попытки'),
+    t.attempts.length ? h('ol', { class: 'steps' }, t.attempts.map((a) => h('li', null,
+      h('div', null, h('b', null, a.account), ' ', pill(a.status), a.error ? h('span', { class: 'note' }, ` · ${a.error}`) : null),
+      h('div', { class: 'reason' }, a.route_reason)))) : h('p', { class: 'note' }, 'Платёж отклонён до выбора аккаунта.'),
+    h('h2', null, 'Проводки'),
+    t.ledger.length ? h('table', null, h('tbody', null, t.ledger.map((l) => h('tr', null, h('td', { class: 'dim' }, l.account), h('td', { class: 'n' }, money(l.amount, l.currency))))))
+      : h('p', { class: 'note' }, 'Проводок нет: деньги ещё не поступили.'),
+    h('h2', null, 'Вебхуки сайту'),
+    t.webhooks.length ? h('table', null, h('tbody', null, t.webhooks.map((w) => h('tr', null,
+      h('td', null, w.event), h('td', null, h('span', { class: `pill ${w.status === 'delivered' ? 'ok' : w.status === 'failed' ? 'bad' : 'n'}` }, w.status)),
+      h('td', { class: 'dim' }, w.last_error || `попыток: ${w.attempts}`)))))
+      : h('p', { class: 'note' }, 'Вебхуков нет (у сайта не задан адрес или статус ещё не менялся).'));
+}
+
+// ---------- песочница ----------
+
+function viewSandbox(main) {
+  const sb = state.cache.sandbox || (state.cache.sandbox = { key: '', made: [] });
+  const made = h('div');
+  const renderMade = () => made.replaceChildren(sb.made.length ? h('table', null,
+    h('thead', null, h('tr', null, ['Платёж', 'Сумма', 'Ответ', ''].map((t) => h('th', null, t)))),
+    h('tbody', null, sb.made.map((d) => h('tr', null,
+      h('td', { class: 'n' }, d.id.slice(0, 8)), h('td', { class: 'n' }, money(d.amount, d.currency)),
+      h('td', null, pill(d.status), d.declineCode ? h('div', { class: 'note' }, DECLINE[d.declineCode] || d.declineCode) : null),
+      h('td', null, d.paymentUrl ? h('a', { href: d.paymentUrl, target: '_blank', rel: 'noopener' }, 'Открыть страницу оплаты ↗') : null)))))
+    : h('p', { class: 'note' }, 'Созданные здесь платежи появятся в этом списке и во вкладке «Платежи».'));
+  renderMade();
+
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('h2', null, 'Тестовый депозит'),
+    h('p', { class: 'note' }, 'Запрос уходит в тот же публичный API, что используют сайты (POST /v1/deposits), с ключом сайта. Ключ хранится только в этой вкладке до перезагрузки.'),
+    actionForm({ class: 'form' }, [
+      field('API-ключ сайта', h('input', { name: 'key', required: true, value: sb.key, placeholder: 'ftk_…', autocomplete: 'off' }), 'full'),
+      field('Сумма', h('input', { name: 'amount', required: true, value: '25.00', inputmode: 'decimal' })),
+      field('Валюта', h('input', { name: 'currency', required: true, value: 'EUR', maxlength: 3 })),
+      field('ID игрока', h('input', { name: 'player', required: true, value: 'demo-player-1' })),
+      field('Страна', h('input', { name: 'country', required: true, value: 'MT', maxlength: 2 })),
+      field('KYC', h('select', { name: 'kyc' }, ['verified', 'none', 'pending', 'rejected'].map((k) => h('option', { value: k }, k)))),
+      field('Дневной лимит игрока', h('input', { name: 'limit', placeholder: 'без лимита', inputmode: 'decimal' })),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'selfExcluded' }), 'Самоисключён'),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать депозит')),
+    ], async (v) => {
+      sb.key = v.key.trim();
+      const amount = toCents(v.amount);
+      if (!amount) throw new Error('Сумма — число больше нуля, например 25 или 25.50');
+      const limit = v.limit.trim() ? toCents(v.limit) : null;
+      const res = await fetch('/v1/deposits', { method: 'POST', headers: {
+        'content-type': 'application/json', authorization: `Bearer ${sb.key}`, 'idempotency-key': `sandbox-${crypto.randomUUID()}` },
+        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), returnUrl: location.origin + '/admin#payments',
+          player: { id: v.player.trim(), country: v.country.trim().toUpperCase(), kyc: v.kyc, depositLimitDaily: limit, selfExcluded: v.selfExcluded } }) });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) { const e = new Error(data?.error?.message || `Ошибка ${res.status}`); e.details = data?.error?.details; throw e; }
+      sb.made.unshift(data); renderMade();
+      return h('pre', { class: 'json' }, JSON.stringify(data, null, 2));
+    }),
+    h('h2', null, 'Созданные'), made));
+}
+
+// ---------- расхождения ----------
+
+async function viewIssues(main) {
+  const all = !!state.cache.issuesAll;
+  const rows = await api('GET', `/admin/v1/issues${all ? '?all=true' : ''}`);
+  const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером' };
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('div', { class: 'row' }, h('h2', null, 'Расхождения'),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.issuesAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),
+    h('p', { class: 'note' }, 'Ситуации, которые система не решает сама. Например, провайдер подтвердил оплату по попытке, которую мы уже закрыли отказом: деньги пришли, а платёж ушёл дальше. Проверь у провайдера и реши вручную.'),
+    rows.length ? h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, ['Когда', 'Что', 'Подробности', 'Платёж', 'Статус'].map((t) => h('th', null, t)))),
+      h('tbody', null, rows.map((i) => h('tr', null,
+        h('td', { class: 'n' }, when(i.created_at)), h('td', null, KIND[i.kind] || i.kind), h('td', { class: 'dim' }, i.details),
+        h('td', { class: 'n' }, i.transaction_id ? h('button', { class: 'link', onclick: () => { state.cache.selTx = i.transaction_id; state.tab = 'payments'; location.hash = 'payments'; renderShell(); } }, i.transaction_id.slice(0, 8)) : '—'),
+        h('td', null, i.resolved ? h('div', null, h('span', { class: 'pill ok' }, 'закрыто'), h('div', { class: 'note' }, `${i.resolved_by_email}: ${i.resolution_note}`))
+          : can('operator') ? actionForm({ class: 'row start' }, [
+            h('input', { name: 'note', placeholder: 'Что сделали', required: true, minlength: 3, style: 'width:200px' }),
+            h('button', { class: 'sm', type: 'submit' }, 'Закрыть'),
+          ], async (v) => { await api('POST', `/admin/v1/issues/${i.id}/resolve`, v); renderShell(); })
+          : h('span', { class: 'pill warn' }, 'открыто'))))))) : h('p', { class: 'note' }, all ? 'Расхождений не было.' : 'Открытых расхождений нет.')));
+}
+
+// ---------- сайты ----------
+
+async function viewSites(main) {
+  const [sites, ops] = await Promise.all([api('GET', '/admin/v1/sites'), api('GET', '/admin/v1/operators')]);
+  const opName = Object.fromEntries(ops.map((o) => [o.id, o.name]));
+  const shown = h('div');
+
+  const siteRow = (s) => {
+    const out = h('div');
+    const confirmRotate = (kind) => {
+      out.replaceChildren(h('div', { class: 'msg err' },
+        kind === 'key' ? 'Старый ключ перестанет работать сразу — сайт получит ошибки, пока не обновит ключ. ' : 'Сайт должен обновить секрет проверки подписи. ',
+        h('button', { class: 'sm danger', onclick: async () => {
+          try {
+            const r = await api('POST', `/admin/v1/sites/${s.id}/rotate-${kind === 'key' ? 'key' : 'webhook-secret'}`);
+            out.replaceChildren(shownOnce(kind === 'key' ? 'Новый API-ключ' : 'Новый секрет вебхуков', [[s.name, r.apiKey || r.webhookSecret]]));
+          } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); }
+        } }, 'Да, перевыпустить'), ' ', h('button', { class: 'sm', onclick: () => out.replaceChildren() }, 'Отмена')));
+    };
+    return [h('tr', null,
+      h('td', null, h('b', null, s.name), h('div', { class: 'note' }, opName[s.operator_id] || '')),
+      h('td', null, actionForm({ class: 'row start' }, [
+        h('input', { name: 'webhookUrl', value: s.webhook_url || '', placeholder: 'https://…/hooks', style: 'width:240px', 'aria-label': 'Адрес вебхука' }),
+        h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
+      ], async (v) => { await api('PATCH', `/admin/v1/sites/${s.id}`, { webhookUrl: v.webhookUrl.trim() || null }); return h('div', { class: 'msg ok' }, 'Сохранено'); })),
+      h('td', null, s.enabled ? h('span', { class: 'pill ok' }, 'работает') : h('span', { class: 'pill m' }, 'отключён')),
+      h('td', null, h('div', { class: 'row start' },
+        h('button', { class: 'sm', onclick: () => confirmRotate('key') }, 'Новый ключ'),
+        h('button', { class: 'sm', onclick: () => confirmRotate('secret') }, 'Новый секрет'),
+        h('button', { class: 'sm', onclick: async () => { try { await api('PATCH', `/admin/v1/sites/${s.id}`, { enabled: !s.enabled }); renderShell(); } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); } } },
+          s.enabled ? 'Отключить' : 'Включить')))),
+      h('tr', null, h('td', { colspan: 4, style: 'border:0;padding:0 8px' }, out))];
+  };
+
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('h2', null, 'Сайты'),
+    h('p', { class: 'note' }, 'Каждый сайт ходит в API со своим ключом. Ключ и секрет подписи вебхуков показываются только при создании или перевыпуске.'),
+    h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, ['Сайт', 'Адрес вебхука', 'Статус', 'Ключи'].map((t) => h('th', null, t)))),
+      h('tbody', null, sites.map(siteRow)))),
+    h('h2', null, 'Новый сайт'),
+    actionForm({ class: 'form' }, [
+      field('Оператор', h('select', { name: 'operatorId', required: true }, ops.map((o) => h('option', { value: o.id }, o.name)))),
+      field('Название', h('input', { name: 'name', required: true, placeholder: 'my-casino' })),
+      field('Адрес вебхука', h('input', { name: 'webhookUrl', placeholder: 'https://…/hooks (можно позже)' }), 'wide'),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
+    ], async (v) => {
+      const s = await api('POST', '/admin/v1/sites', { operatorId: v.operatorId, name: v.name, webhookUrl: v.webhookUrl.trim() || null });
+      shown.replaceChildren(shownOnce(`Сайт «${s.name}» создан`, [['API-ключ', s.apiKey], ['Секрет подписи вебхуков', s.webhookSecret]]));
+      return null;
+    }), shown));
+}
+
+// ---------- операторы и провайдеры ----------
+
+async function viewSetup(main) {
+  const [ops, provs] = await Promise.all([api('GET', '/admin/v1/operators'), api('GET', '/admin/v1/providers')]);
+  main.replaceChildren(h('div', { class: 'grid2' },
+    h('section', { class: 'panel' },
+      h('h2', null, 'Операторы (лицензии)'),
+      h('table', null, h('thead', null, h('tr', null, ['Название', 'Страны лицензии', 'KYC выше', 'Попыток'].map((t) => h('th', null, t)))),
+        h('tbody', null, ops.map((o) => h('tr', null, h('td', null, o.name), h('td', null, h('div', { class: 'tags' }, o.licenses.map((c) => h('span', { class: 'tag' }, c)))),
+          h('td', { class: 'n' }, o.kyc_required_above ? money(o.kyc_required_above) : '—'), h('td', { class: 'n' }, o.max_attempts))))),
+      actionForm({ class: 'form' }, [
+        field('Название', h('input', { name: 'name', required: true })),
+        field('Страны лицензии', h('input', { name: 'licenses', required: true, placeholder: 'MT, DE, IE' })),
+        field('KYC обязателен выше', h('input', { name: 'kyc', placeholder: 'например 300', inputmode: 'decimal' })),
+        h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Добавить')),
+      ], async (v) => {
+        await api('POST', '/admin/v1/operators', { name: v.name, licenses: list(v.licenses), kycRequiredAbove: v.kyc.trim() ? toCents(v.kyc) : null });
+        renderShell();
+      })),
+    h('section', { class: 'panel' },
+      h('h2', null, 'Провайдеры'),
+      h('table', null, h('thead', null, h('tr', null, ['Название', 'Код', 'Адаптер'].map((t) => h('th', null, t)))),
+        h('tbody', null, provs.map((p) => h('tr', null, h('td', null, p.name), h('td', { class: 'n' }, p.code), h('td', { class: 'n' }, p.adapter))))),
+      h('p', { class: 'note' }, 'Адаптер — модуль интеграции в коде сервера. Сейчас подключён mock.'),
+      actionForm({ class: 'form' }, [
+        field('Название', h('input', { name: 'name', required: true })),
+        field('Код', h('input', { name: 'code', required: true, placeholder: 'viva' })),
+        field('Адаптер', h('input', { name: 'adapter', required: true, value: 'mock' })),
+        h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Добавить')),
+      ], async (v) => { await api('POST', '/admin/v1/providers', v); renderShell(); }))));
+}
+
+// ---------- пользователи ----------
+
+async function viewUsers(main) {
+  const users = await api('GET', '/admin/v1/users');
+  const shown = h('div');
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('h2', null, 'Пользователи борды'),
+    h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, ['Email', 'Роль', '2FA', 'Последний вход', ''].map((t) => h('th', null, t)))),
+      h('tbody', null, users.map((u) => {
+        const self = u.id === state.me.id;
+        const out = h('span');
+        const act = async (fn) => { try { await fn(); renderShell(); } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); } };
+        return h('tr', null,
+          h('td', null, u.email, self ? h('span', { class: 'note' }, ' (вы)') : null,
+            u.disabled ? h('div', null, h('span', { class: 'pill m' }, 'заблокирован')) : null, u.locked ? h('div', null, h('span', { class: 'pill warn' }, 'временная блокировка')) : null),
+          h('td', null, self ? u.role : h('select', { style: 'width:auto', 'aria-label': 'Роль', onchange: (e) => act(() => api('PATCH', `/admin/v1/users/${u.id}`, { role: e.target.value })) },
+            ['viewer', 'operator', 'admin'].map((r) => h('option', { value: r, selected: u.role === r }, r)))),
+          h('td', null, u.totp_enabled ? h('span', { class: 'pill ok' }, 'включена') : h('span', { class: 'pill warn' }, 'не настроена')),
+          h('td', { class: 'n' }, when(u.last_login_at)),
+          h('td', null, self ? null : h('div', { class: 'row start' },
+            h('button', { class: 'sm', onclick: () => act(() => api('PATCH', `/admin/v1/users/${u.id}`, { disabled: !u.disabled })) }, u.disabled ? 'Разблокировать' : 'Заблокировать'),
+            h('button', { class: 'sm', onclick: () => act(() => api('POST', `/admin/v1/users/${u.id}/reset-2fa`)) }, 'Сбросить 2FA'), out)));
+      })))),
+    h('h2', null, 'Пригласить'),
+    actionForm({ class: 'form' }, [
+      field('Email', h('input', { name: 'email', type: 'email', required: true })),
+      field('Роль', h('select', { name: 'role' }, [['viewer', 'viewer — только просмотр'], ['operator', 'operator — лимиты и расхождения'], ['admin', 'admin — всё']].map(([v, t]) => h('option', { value: v }, t)))),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
+    ], async (v) => {
+      const u = await api('POST', '/admin/v1/users', v);
+      shown.replaceChildren(shownOnce(`Пользователь ${u.email} создан`, [['Временный пароль (при входе — 2FA и смена пароля)', u.temporaryPassword]]));
+      return null;
+    }), shown));
+}
+
+// ---------- журнал ----------
+
+async function viewAudit(main) {
+  const rows = await api('GET', '/admin/v1/audit?limit=200');
+  const ACTION = {
+    'auth.login': 'Вход', 'auth.totp_enabled': 'Первый вход, включена 2FA', 'auth.password_failed': 'Неверный пароль', 'auth.totp_failed': 'Неверный код 2FA',
+    'auth.password_changed': 'Смена пароля', 'account.update': 'Изменён аккаунт', 'account.create': 'Создан аккаунт', 'site.create': 'Создан сайт',
+    'site.update': 'Изменён сайт', 'site.rotate_key': 'Перевыпущен ключ сайта', 'site.rotate_webhook_secret': 'Перевыпущен секрет вебхуков',
+    'operator.create': 'Создан оператор', 'operator.update': 'Изменён оператор', 'provider.create': 'Добавлен провайдер',
+    'user.create': 'Создан пользователь', 'user.create_cli': 'Создан пользователь (консоль)', 'user.update': 'Изменён пользователь',
+    'user.reset_2fa': 'Сброшена 2FA', 'issue.resolve': 'Закрыто расхождение',
+  };
+  const diff = (b, a) => {
+    if (!b || !a) return a && !b ? h('span', { class: 'note' }, 'создано') : null;
+    const keys = Object.keys(a).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]) && !['used_today', 'reserved_today'].includes(k));
+    return keys.length ? h('div', { class: 'diff' }, keys.map((k) => h('div', null, `${k}: `, h('del', null, JSON.stringify(b[k])), ' → ', h('ins', null, JSON.stringify(a[k]))))) : null;
+  };
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('h2', null, 'Журнал аудита'),
+    h('p', { class: 'note' }, 'Каждое изменение и каждый вход. Записи нельзя изменить или удалить.'),
+    h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, ['Когда', 'Кто', 'Действие', 'Объект', 'Изменения', 'IP'].map((t) => h('th', null, t)))),
+      h('tbody', null, rows.map((r) => h('tr', null,
+        h('td', { class: 'n' }, when(r.created_at)), h('td', null, r.user_email || 'система'), h('td', null, ACTION[r.action] || r.action),
+        h('td', { class: 'dim' }, r.entity ? `${r.entity} ${String(r.entity_id || '').slice(0, 8)}` : '—'),
+        h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
+}
+
+const VIEWS = { overview: viewOverview, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
+
+window.addEventListener('hashchange', () => {
+  const id = location.hash.slice(1);
+  if (state.me && id !== state.tab && VIEWS[id] && TABS.some(([t, , r]) => t === id && can(r))) { state.tab = id; renderShell(); }
+});
+boot();

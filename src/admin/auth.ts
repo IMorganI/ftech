@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Pool } from '../db/pool.js';
 import type { Client } from '../db/tx.js';
+import QRCode from 'qrcode';
 import { decrypt, encrypt } from '../crypto.js';
 import {
   hashPassword, verifyPassword, passwordProblem, newTotpSecret, verifyTotp, otpauthUrl,
@@ -127,7 +128,9 @@ export async function authRoutes(app: FastifyInstance, d: AdminDeps) {
     // 2FA ещё не настроена: выдаём новый секрет, включится после первого верного кода.
     const secret = newTotpSecret();
     await pool.query(`UPDATE admin_users SET totp_secret_enc = $2 WHERE id = $1`, [u.id, encrypt(d.encryptionKey, secret)]);
-    return { next: 'totp_setup', totpSecret: secret, otpauthUrl: otpauthUrl(secret, email) };
+    const url = otpauthUrl(secret, email);
+    const qrSvg = await QRCode.toString(url, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+    return { next: 'totp_setup', totpSecret: secret, otpauthUrl: url, qrSvg };
   });
 
   // Шаг 2: код из приложения-аутентификатора.

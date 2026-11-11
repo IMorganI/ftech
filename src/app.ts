@@ -8,6 +8,7 @@ import { depositRoutes } from './routes/deposits.js';
 import { providerWebhookRoutes } from './routes/provider-webhooks.js';
 import { mockProviderRoutes } from './routes/mock-provider.js';
 import { adminPlugin } from './admin/index.js';
+import { boardRoutes } from './admin/board.js';
 
 export interface AppDeps {
   pool?: Pool;
@@ -20,6 +21,7 @@ export interface AppDeps {
   rateLimitPerMinute?: number;
   /** Админка: ключ шифрования секретов и флаг HTTPS-cookie. */
   admin?: { encryptionKey: Buffer; secureCookies: boolean; loginRateLimitPerMinute?: number };
+  trustProxy?: boolean;
 }
 
 export function buildApp(deps: AppDeps = {}): FastifyInstance {
@@ -28,6 +30,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
       ? { level: deps.logLevel, redact: ['req.headers.authorization'] } // ключи сайтов никогда не попадают в логи
       : false,
     bodyLimit: 64 * 1024,
+    trustProxy: deps.trustProxy ?? false,
   });
 
   // Жив ли процесс (для балансировщика).
@@ -68,7 +71,10 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     if (deps.mock) app.register(mockProviderRoutes, { mock: deps.mock });
   }
 
-  if (pool && deps.admin) app.register(adminPlugin, { pool, ...deps.admin });
+  if (pool && deps.admin) {
+    app.register(adminPlugin, { pool, ...deps.admin });
+    app.register(boardRoutes);
+  }
 
   // Внутренние ошибки не раскрываем наружу.
   app.setErrorHandler((err, req, reply) => {

@@ -1,0 +1,22 @@
+# Среда GitHub Codespaces: контейнер с Node.js и отдельная PostgreSQL рядом.
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm
+    volumes:
+      - ../..:/workspaces:cached
+    command: sleep infinity
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ftech
+      POSTGRES_PASSWORD: ftech
+      POSTGRES_DB: ftech
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
