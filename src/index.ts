@@ -20,7 +20,10 @@ if (config.MOCK_PROVIDER_ENABLED) {
   providers.register(new MockAdapter(mock));
 }
 
-const app = buildApp({ pool, providers, secrets, mock, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE });
+const app = buildApp({
+  pool, providers, secrets, mock, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
+  admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://') },
+});
 
 // Мок шлёт вебхуки в наш же сервер — через полный HTTP-путь с проверкой подписи.
 if (mock) {

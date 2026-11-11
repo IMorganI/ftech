@@ -7,6 +7,7 @@ import type { MockProvider } from './providers/mock.js';
 import { depositRoutes } from './routes/deposits.js';
 import { providerWebhookRoutes } from './routes/provider-webhooks.js';
 import { mockProviderRoutes } from './routes/mock-provider.js';
+import { adminPlugin } from './admin/index.js';
 
 export interface AppDeps {
   pool?: Pool;
@@ -17,6 +18,8 @@ export interface AppDeps {
   logLevel?: string;
   /** Запросов в минуту на один API-ключ (или IP без ключа). */
   rateLimitPerMinute?: number;
+  /** Админка: ключ шифрования секретов и флаг HTTPS-cookie. */
+  admin?: { encryptionKey: Buffer; secureCookies: boolean; loginRateLimitPerMinute?: number };
 }
 
 export function buildApp(deps: AppDeps = {}): FastifyInstance {
@@ -64,6 +67,8 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
 
     if (deps.mock) app.register(mockProviderRoutes, { mock: deps.mock });
   }
+
+  if (pool && deps.admin) app.register(adminPlugin, { pool, ...deps.admin });
 
   // Внутренние ошибки не раскрываем наружу.
   app.setErrorHandler((err, req, reply) => {
