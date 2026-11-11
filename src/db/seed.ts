@@ -3,8 +3,11 @@
 import { loadConfig } from '../config.js';
 import { createPool } from './pool.js';
 import { generateApiKey } from '../auth.js';
+import { encrypt, parseEncryptionKey, randomSecret } from '../crypto.js';
 
-const pool = createPool(loadConfig().DATABASE_URL);
+const config = loadConfig();
+const pool = createPool(config.DATABASE_URL);
+const webhookUrl = process.argv[2] ?? null; // npm run seed -- https://my-site.test/hooks
 try {
   const { rows } = await pool.query(`SELECT count(*)::int AS n FROM operators`);
   if (rows[0].n > 0) {
@@ -14,7 +17,10 @@ try {
       `INSERT INTO operators (name, licenses, kyc_required_above) VALUES ('Demo Operator', '{MT,DE,IE,BR,CA}', 30000) RETURNING id`,
     )).rows[0].id;
     const { key, hash } = generateApiKey();
-    await pool.query(`INSERT INTO sites (operator_id, name, api_key_hash) VALUES ($1, 'demo-casino', $2)`, [op, hash]);
+    const webhookSecret = randomSecret('whsec_');
+    await pool.query(
+      `INSERT INTO sites (operator_id, name, api_key_hash, webhook_url, webhook_secret_enc) VALUES ($1, 'demo-casino', $2, $3, $4)`,
+      [op, hash, webhookUrl, encrypt(parseEncryptionKey(config.ENCRYPTION_KEY), webhookSecret)]);
     const prov = (await pool.query(
       `INSERT INTO providers (code, name, adapter) VALUES ('mock', 'Мок-провайдер', 'mock') RETURNING id`,
     )).rows[0].id;
@@ -28,11 +34,12 @@ try {
     ];
     for (const [name, cur, geo, min, max, cap, fee] of accounts) {
       await pool.query(
-        `INSERT INTO merchant_accounts (operator_id, provider_id, name, currencies, countries, min_amount, max_amount, daily_cap, fee_bps)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [op, prov, name, cur, geo, min, max, cap, fee]);
+        `INSERT INTO merchant_accounts (operator_id, provider_id, name, currencies, countries, min_amount, max_amount, daily_cap, fee_bps, credentials_ref)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'MOCK')`, [op, prov, name, cur, geo, min, max, cap, fee]);
     }
-    console.log('Готово. API-ключ сайта demo-casino (сохрани, больше не покажется):\n');
-    console.log('  ' + key + '\n');
+    console.log('Готово. Сохрани, больше не покажется:\n');
+    console.log('  API-ключ сайта demo-casino:   ' + key);
+    console.log('  Секрет подписи вебхуков сайта: ' + webhookSecret + '\n');
   }
 } finally {
   await pool.end();

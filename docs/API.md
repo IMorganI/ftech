@@ -24,6 +24,7 @@ Idempotency-Key: order-2026-000123      ← обязательно, 8–128 си
 {
   "amount": 2500,
   "currency": "EUR",
+  "returnUrl": "https://casino.example/deposit/return",
   "player": {
     "id": "u42",
     "country": "MT",
@@ -38,6 +39,7 @@ Idempotency-Key: order-2026-000123      ← обязательно, 8–128 си
 |---|---|---|
 | `amount` | да | Целое > 0, в центах. Можно строкой: `"2500"` |
 | `currency` | да | ISO 4217: `EUR`, `BRL`, `CAD`… |
+| `returnUrl` | нет | Куда провайдер вернёт игрока после оплаты (только `https://`) |
 | `player.id` | да | ID игрока на стороне сайта |
 | `player.country` | да | ISO 3166-1: `MT`, `DE`, `BR`… |
 | `player.kyc` | нет | `none` (по умолчанию), `pending`, `verified`, `rejected` |
@@ -54,10 +56,17 @@ Idempotency-Key: order-2026-000123      ← обязательно, 8–128 си
   "amount": "2500",
   "currency": "EUR",
   "declineCode": null,
+  "paymentUrl": "https://pay.provider.example/checkout/abc123",
   "createdAt": "2026-11-11T21:48:22.639Z",
   "updatedAt": "2026-11-11T21:48:22.639Z"
 }
 ```
+
+**`paymentUrl`** — страница оплаты провайдера. Отправь туда игрока (редирект): он вводит карту
+у провайдера, к нам и к тебе номера карт не попадают. Ссылка есть, пока `status` = `pending`.
+Если провайдер отказал и платёж ушёл на другой аккаунт, придёт вебхук `deposit.payment_url_changed`
+с новой ссылкой. Если `status` = `pending`, а `paymentUrl` = `null` — провайдер временно недоступен,
+платёж будет переотправлен автоматически, узнать результат можно из вебхука или `GET`.
 
 Отказ — это тоже успешно созданный платёж (`201`) со `status: "declined"` и причиной в `declineCode`:
 
@@ -81,6 +90,45 @@ GET /v1/deposits/{id}
 ```
 
 Отдаёт тот же объект. Сайт видит только свои платежи; чужой или несуществующий — `404`.
+
+## Вебхуки сайту
+
+Когда статус платежа меняется, мы отправляем `POST` на адрес вебхука сайта:
+
+```json
+{
+  "id": "evt_1842",
+  "event": "deposit.succeeded",
+  "data": { "id": "c9bd…", "type": "deposit", "status": "success", "amount": "2500", "currency": "EUR",
+            "declineCode": null, "paymentUrl": null, "updatedAt": "2026-11-11T21:58:18.351Z" }
+}
+```
+
+| `event` | Когда |
+|---|---|
+| `deposit.succeeded` | Провайдер подтвердил оплату — можно зачислять игроку |
+| `deposit.declined` | Платёж окончательно отклонён |
+| `deposit.payment_url_changed` | После каскада у платежа новая страница оплаты (`data.paymentUrl`) |
+
+**Ответь `2xx` в течение 10 секунд.** Иначе повторим с растущей паузой (10 с, 20 с, 40 с… до 6 ч),
+всего до 12 попыток. Одно событие может прийти дважды — обрабатывай идемпотентно по `id` события.
+
+**Обязательно проверяй подпись.** Заголовок `Ftech-Signature: t=<unix-время>,v1=<подпись>`,
+где подпись — HMAC-SHA256 от строки `t + "." + тело запроса` секретом вебхука сайта:
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+function verify(rawBody, header, secret) {
+  const { t, v1 } = Object.fromEntries(header.split(',').map((p) => p.split('=')));
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return false;        // не старше 5 минут
+  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`).digest();
+  const got = Buffer.from(v1, 'hex');
+  return got.length === expected.length && timingSafeEqual(got, expected);
+}
+```
+
+Подпись считай от **сырого тела**, до разбора JSON. Не зачисляй деньги по вебхуку без проверки подписи.
 
 ## Ошибки
 

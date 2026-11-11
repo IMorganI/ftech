@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Pool } from '../db/pool.js';
 import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
+import { enqueueSiteEvent } from '../webhooks/outbox.js';
 
 /*
  * Роутер депозитов.
@@ -26,6 +27,7 @@ export interface DepositRequest {
   idempotencyKey: string;
   amount: bigint;
   currency: string;
+  returnUrl?: string | null;
   player: {
     externalId: string;
     country: string;
@@ -54,6 +56,8 @@ export interface TransactionView {
   status: 'created' | 'pending' | 'success' | 'declined' | 'failed';
   merchantAccountId: string | null;
   declineCode: string | null;
+  /** Куда отправить игрока для оплаты (страница провайдера), пока платёж ожидает оплаты. */
+  paymentUrl: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -87,7 +91,7 @@ function toView(r: Record<string, any>): TransactionView {
   return {
     id: r.id, siteId: r.site_id, playerId: r.player_id, type: r.type, amount: r.amount, currency: r.currency,
     status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code,
-    createdAt: r.created_at, updatedAt: r.updated_at,
+    paymentUrl: r.payment_url ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -152,9 +156,9 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
 
   const insertTx = async (status: 'pending' | 'declined', accountId: string | null, decline: DeclineCode | null) =>
     toView((await c.query(
-      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, idempotency_key, request_hash)
-       VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, $8, $9) RETURNING ${TX_COLUMNS}`,
-      [req.siteId, player.id, req.amount, req.currency, status, accountId, decline, req.idempotencyKey, hash],
+      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, idempotency_key, request_hash, return_url)
+       VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${TX_COLUMNS}`,
+      [req.siteId, player.id, req.amount, req.currency, status, accountId, decline, req.idempotencyKey, hash, req.returnUrl ?? null],
     )).rows[0]);
 
   // 1. Проверки игрока
@@ -289,8 +293,8 @@ async function insertAttempt(c: Client, txId: string, pick: Pick, no: number) {
 }
 
 export type AttemptOutcome =
-  | { status: 'success'; providerRef?: string }
-  | { status: 'declined'; providerRef?: string; error?: string };
+  | { status: 'success'; providerRef?: string; attemptId?: string }
+  | { status: 'declined'; providerRef?: string; error?: string; attemptId?: string };
 
 /**
  * Применяет результат текущей попытки. Повторный вызов для уже завершённого платежа ничего не меняет
@@ -309,6 +313,8 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
        WHERE transaction_id = $1 AND status = 'pending' ORDER BY attempt_no DESC LIMIT 1 FOR UPDATE`, [txId],
     )).rows[0];
     if (!attempt) throw new Error(`У платежа ${txId} нет активной попытки`);
+    // Результат относится к старой попытке (каскад уже ушёл дальше) — текущую не трогаем.
+    if (outcome.attemptId && outcome.attemptId !== attempt.id) return toView(tx);
 
     const amount = tx.amount as bigint;
     const usageArgs = [attempt.merchant_account_id, attempt.usage_day, amount];
@@ -316,7 +322,7 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
     if (outcome.status === 'success') {
       await c.query(
         `UPDATE account_usage SET reserved = reserved - $3, used = used + $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
-      await c.query(`UPDATE transaction_attempts SET status = 'success', provider_ref = $2 WHERE id = $1`,
+      await c.query(`UPDATE transaction_attempts SET status = 'success', provider_ref = coalesce($2, provider_ref) WHERE id = $1`,
         [attempt.id, outcome.providerRef ?? null]);
       await c.query(`UPDATE players SET sticky_account_id = $2, updated_at = now() WHERE id = $1`,
         [tx.player_id, attempt.merchant_account_id]);
@@ -325,13 +331,15 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
         `INSERT INTO ledger_entries (transaction_id, account, amount, currency) VALUES
            ($1, 'merchant:' || $2, $3, $4), ($1, 'player:' || $5, -$3::bigint, $4)`,
         [txId, attempt.merchant_account_id, amount, tx.currency, tx.player_id]);
-      return toView((await c.query(
+      const done = toView((await c.query(
         `UPDATE transactions SET status = 'success', updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`, [txId])).rows[0]);
+      await enqueueSiteEvent(c, done, 'deposit.succeeded');
+      return done;
     }
 
     // Отказ провайдера: снимаем резерв и пробуем следующий аккаунт (каскад).
     await c.query(`UPDATE account_usage SET reserved = reserved - $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
-    await c.query(`UPDATE transaction_attempts SET status = 'declined', provider_ref = $2, error = $3 WHERE id = $1`,
+    await c.query(`UPDATE transaction_attempts SET status = 'declined', provider_ref = coalesce($2, provider_ref), error = $3 WHERE id = $1`,
       [attempt.id, outcome.providerRef ?? null, outcome.error ?? null]);
 
     const ctx = (await c.query(
@@ -350,9 +358,11 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
       : null;
 
     if (!next) {
-      return toView((await c.query(
+      const done = toView((await c.query(
         `UPDATE transactions SET status = 'declined', decline_code = 'all_attempts_failed', merchant_account_id = NULL,
            updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`, [txId])).rows[0]);
+      await enqueueSiteEvent(c, done, 'deposit.declined');
+      return done;
     }
     await reserve(c, next, amount);
     await insertAttempt(c, txId, next, attempt.attempt_no + 1);
@@ -362,7 +372,30 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
   });
 }
 
-export async function getTransaction(pool: Pool, siteId: string, id: string): Promise<TransactionView | null> {
-  const r = await pool.query(`SELECT ${TX_COLUMNS} FROM transactions WHERE id = $1 AND site_id = $2`, [id, siteId]);
+const PAYMENT_URL = `(SELECT a.redirect_url FROM transaction_attempts a
+  WHERE a.transaction_id = transactions.id AND a.status = 'pending' ORDER BY a.attempt_no DESC LIMIT 1) AS payment_url`;
+
+export async function getTransaction(pool: Pool | Client, siteId: string, id: string): Promise<TransactionView | null> {
+  const r = await pool.query(`SELECT ${TX_COLUMNS}, ${PAYMENT_URL} FROM transactions WHERE id = $1 AND site_id = $2`, [id, siteId]);
   return r.rows[0] ? toView(r.rows[0]) : null;
+}
+
+export async function getTransactionById(pool: Pool | Client, id: string): Promise<TransactionView | null> {
+  const r = await pool.query(`SELECT ${TX_COLUMNS}, ${PAYMENT_URL} FROM transactions WHERE id = $1`, [id]);
+  return r.rows[0] ? toView(r.rows[0]) : null;
+}
+
+/** Публичное представление платежа для сайта (без внутренних деталей роутинга). */
+export function serializeTx(tx: TransactionView) {
+  return {
+    id: tx.id,
+    type: tx.type,
+    status: tx.status,
+    amount: tx.amount.toString(),
+    currency: tx.currency,
+    declineCode: tx.declineCode,
+    paymentUrl: tx.status === 'pending' ? tx.paymentUrl : null,
+    createdAt: tx.createdAt.toISOString(),
+    updatedAt: tx.updatedAt.toISOString(),
+  };
 }

@@ -6,6 +6,9 @@ import { migrate } from '../src/db/migrate.js';
 import { buildApp } from '../src/app.js';
 import { generateApiKey } from '../src/auth.js';
 import { resolveAttempt } from '../src/routing/router.js';
+import { ProviderRegistry } from '../src/providers/types.js';
+import { MockAdapter, MockProvider } from '../src/providers/mock.js';
+import { MapSecretStore } from '../src/secrets.js';
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -22,9 +25,14 @@ describe.skipIf(!url)('Депозиты и роутинг', () => {
     pool = createPool(url!);
     await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public;');
     await migrate(pool);
-    app = buildApp({ pool, rateLimitPerMinute: 100000 });
+    app = buildApp({ ...deps(), rateLimitPerMinute: 100000 });
   });
   afterAll(async () => { await app?.close(); await pool?.end(); });
+
+  function deps() {
+    const mock = new MockProvider({ publicBaseUrl: 'https://pay.test' });
+    return { pool, mock, providers: new ProviderRegistry().register(new MockAdapter(mock)), secrets: new MapSecretStore({ MOCK: 'test-secret' }) };
+  }
 
   beforeEach(async () => {
     await pool.query(`TRUNCATE ledger_entries, transaction_attempts, transactions, account_usage, players,
@@ -39,8 +47,8 @@ describe.skipIf(!url)('Депозиты и роутинг', () => {
 
   async function account(name: string, o: { cap?: number; fee?: number; prio?: number; cur?: string; geo?: string; min?: number; max?: number; monthly?: number } = {}) {
     return (await pool.query(
-      `INSERT INTO merchant_accounts (operator_id, provider_id, name, currencies, countries, min_amount, max_amount, daily_cap, monthly_cap, fee_bps, priority)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+      `INSERT INTO merchant_accounts (operator_id, provider_id, name, currencies, countries, min_amount, max_amount, daily_cap, monthly_cap, fee_bps, priority, credentials_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'MOCK') RETURNING id`,
       [op, prov, name, `{${o.cur ?? 'EUR'}}`, `{${o.geo ?? 'MT,DE'}}`, o.min ?? 100, o.max ?? 1_000_000,
        o.cap ?? 1_000_000, o.monthly ?? null, o.fee ?? 250, o.prio ?? 0],
     )).rows[0].id as string;
@@ -290,7 +298,7 @@ describe.skipIf(!url)('Депозиты и роутинг', () => {
 
   it('ограничение частоты: лишние запросы получают 429', async () => {
     await account('A');
-    const limited = buildApp({ pool, rateLimitPerMinute: 3 });
+    const limited = buildApp({ ...deps(), rateLimitPerMinute: 3 });
     const call = () => limited.inject({ method: 'GET', url: '/v1/deposits/00000000-0000-0000-0000-000000000000',
       headers: { authorization: `Bearer ${key}` } });
     const codes = [];
@@ -316,6 +324,6 @@ describe.skipIf(!url)('Депозиты и роутинг', () => {
   it('ответ не раскрывает, через какой аккаунт пошёл платёж', async () => {
     await account('A');
     const body = (await deposit(5000)).json();
-    expect(Object.keys(body).sort()).toEqual(['amount', 'createdAt', 'currency', 'declineCode', 'id', 'status', 'type', 'updatedAt']);
+    expect(Object.keys(body).sort()).toEqual(['amount', 'createdAt', 'currency', 'declineCode', 'id', 'paymentUrl', 'status', 'type', 'updatedAt']);
   });
 });
