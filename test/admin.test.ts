@@ -8,6 +8,7 @@ import { hashPassword, totpAt, totpStep, verifyTotp, base32Encode } from '../src
 import { ProviderRegistry } from '../src/providers/types.js';
 import { MockAdapter, MockProvider } from '../src/providers/mock.js';
 import { MapSecretStore } from '../src/secrets.js';
+import { resolveAttempt } from '../src/routing/router.js';
 
 const url = process.env.TEST_DATABASE_URL;
 const ENC_KEY = Buffer.alloc(32, 9);
@@ -302,6 +303,38 @@ describe.skipIf(!url)('Админка', () => {
     expect((await o.post(`/admin/v1/issues/${id}/resolve`, { note: 'Вернули игроку вручную' })).statusCode).toBe(200);
     expect((await o.get('/admin/v1/issues')).json()).toHaveLength(0);
     expect((await o.get('/admin/v1/issues?all=true')).json()[0]).toMatchObject({ resolved: true, resolved_by_email: 'o@x.io' });
+  });
+
+  it('статистика: успешные депозиты, оборот, заработок платформы и расходы на провайдеров', async () => {
+    await account('A', 200); // провайдер берёт 2%
+    await user('a@x.io', 'admin');
+    const a = as((await login('a@x.io')).cookie);
+    await a.patch(`/admin/v1/operators/${op}`, { platformFeeBps: 150 }); // платформа берёт 1.5%
+    const { apiKey } = (await a.post('/admin/v1/sites', { operatorId: op, name: 'casino' })).json();
+    const dep = async (amount: number, key: string) => (await app.inject({ method: 'POST', url: '/v1/deposits',
+      headers: { authorization: `Bearer ${apiKey}`, 'idempotency-key': key },
+      payload: { amount, currency: 'EUR', player: { id: key, country: 'MT', kyc: 'verified' } } })).json();
+    const d1 = await dep(10000, 'stats-key-1'); await resolveAttempt(pool, d1.id, { status: 'success' });
+    const d2 = await dep(3333, 'stats-key-2'); await resolveAttempt(pool, d2.id, { status: 'success' });
+    await dep(5000, 'stats-key-3'); // ждёт оплаты
+    await dep(1000, 'stats-key-4').then((d) => resolveAttempt(pool, d.id, { status: 'declined' })); // отказ, каскадить некуда
+
+    const s = (await a.get('/admin/v1/stats?period=today&tz=Europe/Kyiv')).json();
+    expect(s.totals).toEqual([{ currency: 'EUR', attempts: 4, succeeded: 2, declined: 1, pending: 1,
+      volume: '13333', earned: '199', provider_cost: '266' }]); // 150 + 49 (округление вниз), 200 + 66
+    expect(s.series.reduce((n: number, p: { succeeded: number }) => n + p.succeeded, 0)).toBe(2);
+    expect(s.unit).toBe('hour');
+    expect(s.bySite[0]).toMatchObject({ site: 'casino', succeeded: 2, attempts: 4, earned: '199' });
+    expect(s.recent).toHaveLength(4);
+    expect(s.platformFeeBps).toEqual({ min: 150, max: 150 });
+
+    // Смена процента не переписывает уже заработанное
+    await a.patch(`/admin/v1/operators/${op}`, { platformFeeBps: 1000 });
+    expect((await a.get('/admin/v1/stats?period=7d')).json().totals[0].earned).toBe('199');
+    expect((await a.get('/admin/v1/stats?period=30d')).json().series).toHaveLength(30);
+    // Неизвестный пояс не ломает обзор: считаем в UTC; старое/новое название Киева понимается
+    expect((await a.get('/admin/v1/stats?tz=Mars/Olympus')).json().tz).toBe('UTC');
+    expect(['Europe/Kyiv', 'Europe/Kiev']).toContain((await a.get('/admin/v1/stats?tz=Europe/Kyiv')).json().tz);
   });
 
   it('сводка для борды', async () => {

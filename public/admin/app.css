@@ -117,3 +117,37 @@ pre.json { font: 12px var(--mono); background: var(--track); padding: 8px; borde
 @media (max-width: 900px) { .grid2 { grid-template-columns: minmax(0, 1fr); } .form .wide { grid-column: auto; } }
 @media (prefers-reduced-motion: no-preference) { .bar i { transition: width .3s; } }
 #tx-detail, .stack { display: grid; gap: 10px; }
+
+/* обзор */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg button { border: 0; background: none; padding: 5px 12px; border-radius: 6px; color: var(--muted); }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.kpi { display: grid; gap: 4px; align-content: start; padding: 14px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+.kpi-label { font-size: 12px; color: var(--muted); }
+.kpi-value { font: 600 26px/1.15 var(--mono); font-variant-numeric: tabular-nums; display: grid; gap: 2px; }
+.kpi-sub { font-size: 12px; color: var(--muted); }
+.kpi.main .kpi-value { color: var(--accent); }
+.kpi.money .kpi-value { color: var(--ok); }
+td.money { color: var(--ok); }
+.chart-wrap { overflow-x: auto; }
+.chart { width: 100%; min-width: 520px; height: auto; display: block; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .axis { fill: var(--muted); font: 11px var(--sans); }
+.chart .bar-ok { fill: var(--ok); }
+.chart .bar-bad { fill: var(--bad); opacity: .55; }
+.chart g:hover rect { opacity: .8; }
+.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.legend .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-left: 6px; }
+.legend .sw.ok { background: var(--ok); } .legend .sw.bad { background: var(--bad); opacity: .55; }
+.msg.warn { background: var(--warn-soft); color: var(--warn); }
+.panel.hint { border-color: var(--accent); background: var(--accent-soft); }
+.panel.hint p { margin: 0; }
+.panel.attention { border-color: var(--warn); }
+ul.plain { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+@media (max-width: 700px) {
+  header.top nav.tabs { order: 3; flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  header.top nav.tabs button { white-space: nowrap; }
+  header.top .who { margin-left: auto; }
+  .kpi-value { font-size: 22px; }
+}
