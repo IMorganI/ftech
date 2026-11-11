@@ -23,6 +23,7 @@ if (config.MOCK_PROVIDER_ENABLED) {
 const app = buildApp({
   pool, providers, secrets, mock, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
   admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://') },
+  trustProxy: config.TRUST_PROXY,
 });
 
 // Мок шлёт вебхуки в наш же сервер — через полный HTTP-путь с проверкой подписи.
