@@ -102,6 +102,17 @@ export async function submitPending(d: PaymentDeps, txId: string): Promise<Trans
   return tx;
 }
 
+/** GET-проверка адреса вебхука провайдером (Viva при настройке). Нет такой у адаптера — null. */
+export async function providerWebhookChallenge(d: PaymentDeps, accountId: string, query: Record<string, unknown>): Promise<unknown | null> {
+  const acc = (await d.pool.query(
+    `SELECT m.id, m.credentials_ref, p.adapter FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id WHERE m.id = $1`,
+    [accountId])).rows[0];
+  if (!acc) throw new InvalidWebhookError('Аккаунт не найден');
+  const adapter = d.providers.get(acc.adapter);
+  if (!adapter.webhookChallenge) return null;
+  return adapter.webhookChallenge(await credsFor(d, acc.id, acc.credentials_ref), query);
+}
+
 export type WebhookResult = 'processed' | 'duplicate' | 'unknown_payment' | 'still_pending' | 'issue_recorded';
 
 /**
@@ -110,6 +121,7 @@ export type WebhookResult = 'processed' | 'duplicate' | 'unknown_payment' | 'sti
  */
 export async function handleProviderWebhook(
   d: PaymentDeps, accountId: string, headers: Record<string, string | string[] | undefined>, rawBody: string,
+  query: Record<string, unknown> = {},
 ): Promise<WebhookResult> {
   const acc = (await d.pool.query(
     `SELECT m.id, m.credentials_ref, p.adapter FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id WHERE m.id = $1`,
@@ -118,7 +130,7 @@ export async function handleProviderWebhook(
   if (!acc) throw new InvalidWebhookError('Аккаунт не найден');
   const adapter = d.providers.get(acc.adapter);
   const creds = await credsFor(d, acc.id, acc.credentials_ref);
-  const hook = adapter.verifyWebhook(creds, headers, rawBody); // бросит InvalidWebhookError
+  const hook = adapter.verifyWebhook(creds, headers, rawBody, query); // бросит InvalidWebhookError
 
   const fresh = (await d.pool.query(
     `INSERT INTO provider_webhook_events (merchant_account_id, event_id, provider_ref, body)

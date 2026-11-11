@@ -5,6 +5,7 @@ import { parseEncryptionKey } from './crypto.js';
 import { EnvSecretStore } from './secrets.js';
 import { ProviderRegistry } from './providers/types.js';
 import { MockAdapter, MockProvider } from './providers/mock.js';
+import { VivaAdapter } from './providers/viva.js';
 import { dispatchOnce } from './webhooks/outbox.js';
 import { reconcilePending } from './payments/flow.js';
 
@@ -12,7 +13,7 @@ const config = loadConfig();
 const encryptionKey = parseEncryptionKey(config.ENCRYPTION_KEY);
 const pool = createPool(config.DATABASE_URL);
 const secrets = new EnvSecretStore();
-const providers = new ProviderRegistry();
+const providers = new ProviderRegistry().register(new VivaAdapter());
 
 let mock: MockProvider | undefined;
 if (config.MOCK_PROVIDER_ENABLED) {
