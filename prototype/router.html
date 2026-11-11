@@ -1,0 +1,288 @@
+<title>Платёжный роутер</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: operator console — accounts board on the left, test terminal on the right, ledger below */
+:root{
+  --bg:#f3f4f6; --panel:#ffffff; --ink:#15181d; --muted:#5d6573; --line:#dde0e6;
+  --accent:#2747c9; --accent-soft:#e6eafb;
+  --ok:#15803d; --ok-soft:#dcf2e3; --warn:#b45309; --warn-soft:#fbeed8; --bad:#b91c1c; --bad-soft:#fbe2e2;
+  --track:#e9ebf0;
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f1217; --panel:#171b22; --ink:#e7eaf0; --muted:#98a1b0; --line:#2a303b;
+  --accent:#7d95ff; --accent-soft:#1f2747;
+  --ok:#4ade80; --ok-soft:#14301f; --warn:#fbbf24; --warn-soft:#3a2c10; --bad:#f87171; --bad-soft:#3a1717;
+  --track:#252a34; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f1217; --panel:#171b22; --ink:#e7eaf0; --muted:#98a1b0; --line:#2a303b;
+  --accent:#7d95ff; --accent-soft:#1f2747;
+  --ok:#4ade80; --ok-soft:#14301f; --warn:#fbbf24; --warn-soft:#3a2c10; --bad:#f87171; --bad-soft:#3a1717;
+  --track:#252a34; color-scheme:dark}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.45;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 40px}
+.wrap{max-width:1240px;margin:0 auto;display:grid;gap:20px}
+header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:12px}
+h1{font-size:22px;font-weight:600;margin:0;text-wrap:balance}
+.sub{color:var(--muted);margin:2px 0 0;max-width:70ch}
+h2{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0}
+.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:20px;align-items:start}
+@media (max-width:900px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;display:grid;gap:14px;min-width:0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.accs{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px}
+.acc{border:1px solid var(--line);border-radius:8px;padding:12px;display:grid;gap:8px;position:relative}
+.acc.off{opacity:.5}
+.acc.hot{outline:2px solid var(--accent);outline-offset:-1px}
+.acc .name{font-weight:600}
+.acc .prov{color:var(--muted);font-size:12px}
+.tags{display:flex;flex-wrap:wrap;gap:4px}
+.tag{font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:4px;background:var(--track);color:var(--muted)}
+.bar{height:8px;border-radius:4px;background:var(--track);overflow:hidden;display:flex}
+.bar i{display:block;height:100%}
+.bar .u{background:var(--ok)} .bar .r{background:var(--warn)}
+.acc[data-lvl="warn"] .bar .u{background:var(--warn)}
+.acc[data-lvl="full"] .bar .u{background:var(--bad)}
+.nums{display:flex;justify-content:space-between;font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted)}
+.nums b{color:var(--ink);font-weight:500}
+.meta{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;font-size:12px;color:var(--muted)}
+.meta span:nth-child(even){color:var(--ink);font-family:var(--mono);font-variant-numeric:tabular-nums}
+.acc .ctl{display:flex;gap:6px}
+button,input,select{font:inherit;color:inherit}
+button{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:6px 10px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.sm{padding:3px 8px;font-size:12px}
+label{display:grid;gap:4px;font-size:12px;color:var(--muted)}
+input,select{border:1px solid var(--line);background:var(--bg);border-radius:6px;padding:6px 8px;min-width:0}
+.form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.form .full{grid-column:1/-1}
+.players{display:grid;gap:6px}
+.pl{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+.pl .id{font-family:var(--mono)}
+.pill{font-size:11px;padding:1px 7px;border-radius:10px;white-space:nowrap}
+.pill.ok{background:var(--ok-soft);color:var(--ok)} .pill.warn{background:var(--warn-soft);color:var(--warn)} .pill.bad{background:var(--bad-soft);color:var(--bad)} .pill.n{background:var(--accent-soft);color:var(--accent)}
+.result{font-size:13px;border-radius:8px;padding:10px 12px;background:var(--track);display:grid;gap:4px}
+.result.ok{background:var(--ok-soft)} .result.bad{background:var(--bad-soft)}
+.steps{margin:0;padding-left:18px;color:var(--muted);font-size:12px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:760px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-weight:500;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+td.n{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+td.why{color:var(--muted)}
+.stats{display:flex;flex-wrap:wrap;gap:18px;font-size:13px;color:var(--muted)}
+.stats b{color:var(--ink);font-family:var(--mono);font-weight:500}
+.note{font-size:12px;color:var(--muted)}
+details summary{cursor:pointer;font-weight:500}
+@media (prefers-reduced-motion:no-preference){.bar i{transition:width .3s}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Платёжный роутер</h1>
+      <p class="sub">Прототип на мок-платёжках, без реальных денег. Добавляй мерчант-аккаунты с лимитами, гони тестовые депозиты и смотри, как роутер их распределяет, переключает при заполнении и каскадит при отказах.</p>
+    </div>
+    <div class="row" style="justify-content:flex-start">
+      <button id="sim" class="primary">Прогнать 20 платежей</button>
+      <button id="reset">Новые сутки (сброс оборота)</button>
+    </div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="row"><h2>Мерчант-аккаунты</h2><span class="note">переключение на 95% дневного лимита</span></div>
+      <div class="accs" id="accs"></div>
+      <details>
+        <summary>+ Добавить аккаунт</summary>
+        <form class="form" id="addForm" style="margin-top:12px">
+          <label>Провайдер<input id="f-prov" required value="Эквайер E"></label>
+          <label>Название аккаунта<input id="f-name" required value="E · EUR-1"></label>
+          <label>Валюты (через запятую)<input id="f-cur" value="EUR"></label>
+          <label>Страны (через запятую)<input id="f-geo" value="MT, DE, IE"></label>
+          <label>Мин. платёж<input id="f-min" type="number" value="10"></label>
+          <label>Макс. платёж<input id="f-max" type="number" value="1500"></label>
+          <label>Дневной лимит<input id="f-cap" type="number" value="5000"></label>
+          <label>Комиссия, %<input id="f-fee" type="number" step="0.1" value="2.5"></label>
+          <label>Одобряемость, %<input id="f-appr" type="number" value="85"></label>
+          <div class="full"><button class="primary" type="submit">Добавить</button></div>
+        </form>
+      </details>
+    </section>
+
+    <section class="panel">
+      <h2>Тестовый депозит</h2>
+      <form class="form" id="payForm">
+        <label class="full">Игрок<select id="p-player"></select></label>
+        <label>Сумма<input id="p-amt" type="number" value="250" min="1"></label>
+        <label>Валюта<select id="p-cur"><option>EUR</option><option>BRL</option><option>CAD</option></select></label>
+        <div class="full"><button class="primary" type="submit">Провести через роутер</button></div>
+      </form>
+      <div id="last" class="result">Здесь появится разбор последнего платежа: какие проверки прошёл, какие аккаунты отсеялись и почему выбран этот.</div>
+      <h2>Игроки (данные с сайта)</h2>
+      <div class="players" id="players"></div>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="row"><h2>Журнал операций (ledger)</h2><span class="note">каждая запись привязана к игроку и конкретному аккаунту</span></div>
+    <div class="tbl"><table>
+      <thead><tr><th>Время</th><th>Игрок</th><th>Сумма</th><th>Итог</th><th>Аккаунт</th><th>Попытки и причина выбора</th></tr></thead>
+      <tbody id="ledger"></tbody>
+    </table></div>
+  </section>
+</div>
+
+<script>
+const SWITCH_AT = 0.95, MAX_ATTEMPTS = 3, KYC_THRESHOLD = 300;
+let seq = 0;
+const accounts = [
+  {id:'a1',prov:'Эквайер A',name:'A · EUR-1',cur:['EUR'],geo:['MT','DE','IE'],min:10,max:2000,cap:6000,fee:2.2,appr:.88,on:true},
+  {id:'a2',prov:'Эквайер A',name:'A · EUR-2',cur:['EUR'],geo:['MT','DE','IE'],min:10,max:2000,cap:4000,fee:2.2,appr:.86,on:true},
+  {id:'a3',prov:'Эквайер B',name:'B · EUR',cur:['EUR'],geo:['DE','IE'],min:20,max:5000,cap:8000,fee:3.1,appr:.93,on:true},
+  {id:'a4',prov:'Кошелёк C',name:'C · Multi',cur:['EUR','CAD'],geo:['MT','IE','CA'],min:5,max:800,cap:3000,fee:1.8,appr:.80,on:true},
+  {id:'a5',prov:'Локальный D',name:'D · PIX BRL',cur:['BRL'],geo:['BR'],min:20,max:10000,cap:30000,fee:1.5,appr:.90,on:true},
+].map(a=>({...a,used:0,reserved:0,last:false}));
+const players = [
+  {id:'P-1001',geo:'MT',kyc:true,lim:2000,dep:0,excl:false,sticky:null},
+  {id:'P-1002',geo:'DE',kyc:false,lim:1000,dep:0,excl:false,sticky:null},
+  {id:'P-1003',geo:'IE',kyc:true,lim:5000,dep:0,excl:false,sticky:null},
+  {id:'P-1004',geo:'BR',kyc:true,lim:8000,dep:0,excl:false,sticky:null},
+  {id:'P-1005',geo:'CA',kyc:true,lim:1500,dep:0,excl:false,sticky:null},
+  {id:'P-1006',geo:'DE',kyc:true,lim:3000,dep:0,excl:true,sticky:null},
+];
+const ledger = [];
+const curOf = g => g==='BR'?'BRL':g==='CA'?'CAD':'EUR';
+const fmt = n => Math.round(n).toLocaleString('ru-RU');
+const free = a => a.cap*SWITCH_AT - a.used - a.reserved;
+
+function route(p, amt, cur){
+  const steps = [], att = [];
+  // 1. Проверки игрока: превышен его лимит — отказ, а не другой аккаунт
+  if(p.excl) return done('decline','player_self_excluded','Игрок в самоисключении — платёж запрещён');
+  if(!p.kyc && amt>KYC_THRESHOLD) return done('decline','kyc_required',`Без KYC максимум ${KYC_THRESHOLD}`);
+  if(p.dep+amt>p.lim) return done('decline','player_limit_exceeded',`Лимит игрока ${fmt(p.lim)}, уже внесено ${fmt(p.dep)}`);
+  if(cur!==curOf(p.geo)) return done('decline','currency_mismatch',`Валюта игрока ${curOf(p.geo)}`);
+  steps.push('Игрок: проверки пройдены');
+  // 2. Фильтр аккаунтов
+  const cands = [];
+  for(const a of accounts){
+    let why = null;
+    if(!a.on) why='выключен';
+    else if(!a.cur.includes(cur)) why='нет валюты '+cur;
+    else if(!a.geo.includes(p.geo)) why='нет страны '+p.geo;
+    else if(amt<a.min||amt>a.max) why=`сумма вне ${a.min}–${a.max}`;
+    else if(free(a)<amt) why='дневной лимит заполнен';
+    if(why) steps.push(`${a.name}: отсеян (${why})`); else cands.push(a);
+  }
+  if(!cands.length) return done('decline','no_route','Нет аккаунта с свободным лимитом под эти условия');
+  // 3. Сортировка: липкость, затем комиссия и одобряемость
+  cands.sort((x,y)=> (y.id===p.sticky)-(x.id===p.sticky) || (y.appr - y.fee/10) - (x.appr - x.fee/10));
+  // 4. Резерв и каскад
+  for(const a of cands.slice(0,MAX_ATTEMPTS)){
+    a.reserved += amt;
+    const ok = Math.random() < a.appr;
+    a.reserved -= amt;
+    const reason = a.id===p.sticky ? 'липкость к прошлому аккаунту' : (p.sticky ? 'прошлый аккаунт недоступен/заполнен' : 'лучший по комиссии и одобряемости');
+    if(ok){
+      a.used += amt; p.dep += amt;
+      const moved = p.sticky && p.sticky!==a.id;
+      p.sticky = a.id;
+      att.push(`${a.name}: ✓ (${reason})`);
+      return done('success', moved?'switched':'ok', null, a);
+    }
+    att.push(`${a.name}: отказ провайдера → каскад`);
+  }
+  return done('decline','all_attempts_failed','Все попытки отклонены провайдерами');
+
+  function done(status, code, msg, acc){
+    const e = {t:new Date(), id:++seq, player:p.id, amt, cur, status, code, msg, acc:acc?acc.name:'—', att:[...att], steps};
+    ledger.unshift(e); accounts.forEach(x=>x.last = acc && x.id===acc.id);
+    return e;
+  }
+}
+
+/* --- rendering --- */
+const $ = id => document.getElementById(id);
+function renderAccs(){
+  $('accs').innerHTML = accounts.map(a=>{
+    const u=a.used/a.cap*100, r=a.reserved/a.cap*100, f=a.used/a.cap;
+    const lvl = f>=SWITCH_AT?'full':f>=.75?'warn':'ok';
+    const pill = !a.on?'<span class="pill n">выкл</span>':lvl==='full'?'<span class="pill bad">заполнен</span>':lvl==='warn'?'<span class="pill warn">близко к лимиту</span>':'<span class="pill ok">активен</span>';
+    return `<div class="acc ${a.on?'':'off'} ${a.last?'hot':''}" data-lvl="${lvl}">
+      <div class="row"><div><div class="name">${a.name}</div><div class="prov">${a.prov}</div></div>${pill}</div>
+      <div class="bar"><i class="u" style="width:${Math.min(u,100)}%"></i><i class="r" style="width:${r}%"></i></div>
+      <div class="nums"><span>оборот <b>${fmt(a.used)}</b> / ${fmt(a.cap)}</span><span>${Math.round(f*100)}%</span></div>
+      <div class="meta"><span>Платёж</span><span>${a.min}–${fmt(a.max)}</span><span>Комиссия</span><span>${a.fee}%</span><span>Одобр.</span><span>${Math.round(a.appr*100)}%</span></div>
+      <div class="tags">${a.cur.map(c=>`<span class="tag">${c}</span>`).join('')}${a.geo.map(g=>`<span class="tag">${g}</span>`).join('')}</div>
+      <div class="ctl"><button class="sm" data-tog="${a.id}">${a.on?'Выключить':'Включить'}</button><button class="sm" data-del="${a.id}">Удалить</button></div>
+    </div>`}).join('');
+}
+function renderPlayers(){
+  const sel=$('p-player'), v=sel.value;
+  sel.innerHTML = players.map(p=>`<option value="${p.id}">${p.id} · ${p.geo} · ${curOf(p.geo)}</option>`).join('');
+  if(v) sel.value=v;
+  $('players').innerHTML = players.map(p=>{
+    const s = p.excl?'<span class="pill bad">самоисключён</span>':!p.kyc?'<span class="pill warn">без KYC</span>':'<span class="pill ok">KYC</span>';
+    const acc = accounts.find(a=>a.id===p.sticky);
+    return `<div class="pl"><span class="id">${p.id}</span><span>${p.geo} · внесено ${fmt(p.dep)} / ${fmt(p.lim)}${acc?` · <span class="note">${acc.name}</span>`:''}</span>${s}</div>`}).join('');
+}
+const CODE = {ok:'Успех',switched:'Успех, переключён',player_self_excluded:'Отказ: самоисключение',kyc_required:'Отказ: нужен KYC',player_limit_exceeded:'Отказ: лимит игрока',currency_mismatch:'Отказ: валюта',no_route:'Отказ: нет маршрута',all_attempts_failed:'Отказ провайдеров'};
+function renderLedger(){
+  $('ledger').innerHTML = ledger.slice(0,60).map(e=>`<tr>
+    <td class="n">${e.t.toLocaleTimeString('ru-RU')}</td><td class="n">${e.player}</td><td class="n">${fmt(e.amt)} ${e.cur}</td>
+    <td><span class="pill ${e.status==='success'?(e.code==='switched'?'n':'ok'):'bad'}">${CODE[e.code]}</span></td>
+    <td>${e.acc}</td><td class="why">${e.att.length?e.att.join(' · '):(e.msg||'')}</td></tr>`).join('') || '<tr><td colspan="6" class="why">Пока пусто. Проведи платёж или нажми «Прогнать 20 платежей».</td></tr>';
+  const ok = ledger.filter(e=>e.status==='success');
+  const vol = {}; ok.forEach(e=>vol[e.cur]=(vol[e.cur]||0)+e.amt);
+  const blocked = ledger.filter(e=>['player_limit_exceeded','kyc_required','player_self_excluded'].includes(e.code)).length;
+  $('stats').innerHTML = `<span>Платежей <b>${ledger.length}</b></span><span>Успешных <b>${ok.length}</b></span>
+    <span>Переключений аккаунта <b>${ledger.filter(e=>e.code==='switched').length}</b></span>
+    <span>Каскадов <b>${ledger.filter(e=>e.att.length>1).length}</b></span>
+    <span>Заблокировано по лимитам игрока <b>${blocked}</b></span>
+    <span>Оборот <b>${Object.entries(vol).map(([c,v])=>fmt(v)+' '+c).join(' · ')||'0'}</b></span>`;
+}
+function renderLast(e){
+  const el=$('last'); el.className='result '+(e.status==='success'?'ok':'bad');
+  el.innerHTML = `<div><b>${CODE[e.code]}</b> · ${e.player} · ${fmt(e.amt)} ${e.cur}${e.acc!=='—'?' → '+e.acc:''}</div>
+    ${e.msg?`<div>${e.msg}</div>`:''}
+    <ol class="steps">${[...e.steps,...e.att].map(s=>`<li>${s}</li>`).join('')}</ol>`;
+}
+function render(){renderAccs();renderPlayers();renderLedger();}
+
+/* --- events --- */
+$('payForm').addEventListener('submit',ev=>{ev.preventDefault();
+  const p=players.find(x=>x.id===$('p-player').value), amt=+$('p-amt').value;
+  if(!(amt>0)) return;
+  renderLast(route(p,amt,$('p-cur').value)); render();});
+$('p-player').addEventListener('change',()=>{const p=players.find(x=>x.id===$('p-player').value);$('p-cur').value=curOf(p.geo);});
+$('sim').addEventListener('click',()=>{
+  let last;
+  for(let i=0;i<20;i++){
+    const p=players[Math.floor(Math.random()*players.length)];
+    const base = p.geo==='BR'?800:p.geo==='CA'?150:300;
+    const amt = Math.round((base*(0.3+Math.random()*1.4))/5)*5;
+    last = route(p,amt,curOf(p.geo));
+  }
+  renderLast(last); render();});
+$('reset').addEventListener('click',()=>{accounts.forEach(a=>{a.used=0;a.reserved=0;a.last=false});players.forEach(p=>p.dep=0);render();
+  $('last').className='result';$('last').textContent='Новые сутки: оборот аккаунтов и дневные депозиты игроков обнулены. Журнал сохранён.';});
+$('accs').addEventListener('click',ev=>{
+  const t=ev.target.dataset.tog, d=ev.target.dataset.del;
+  if(t){const a=accounts.find(x=>x.id===t);a.on=!a.on;render();}
+  if(d){const i=accounts.findIndex(x=>x.id===d);accounts.splice(i,1);players.forEach(p=>{if(p.sticky===d)p.sticky=null});render();}});
+$('addForm').addEventListener('submit',ev=>{ev.preventDefault();
+  const list=id=>$(id).value.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean);
+  accounts.push({id:'a'+Date.now(),prov:$('f-prov').value,name:$('f-name').value,cur:list('f-cur'),geo:list('f-geo'),
+    min:+$('f-min').value,max:+$('f-max').value,cap:+$('f-cap').value,fee:+$('f-fee').value,appr:Math.min(1,+$('f-appr').value/100),on:true,used:0,reserved:0,last:false});
+  render();});
+
+// стартовое состояние: немного трафика, чтобы борда не была пустой
+for(let i=0;i<14;i++){const p=players[i%players.length];route(p,Math.round((p.geo==='BR'?900:p.geo==='CA'?120:280)*(0.6+Math.random()*0.8)/5)*5,curOf(p.geo));}
+render();
+</script>
