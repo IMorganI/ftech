@@ -18,13 +18,15 @@ describe('HTTP', () => {
 });
 
 describe('Конфигурация', () => {
-  it('падает с понятной ошибкой без DATABASE_URL', () => {
+  it('падает с понятной ошибкой без DATABASE_URL и ENCRYPTION_KEY', () => {
     expect(() => loadConfig({})).toThrow(/DATABASE_URL/);
+    expect(() => loadConfig({ DATABASE_URL: 'postgres://x' })).toThrow(/ENCRYPTION_KEY/);
   });
 
   it('подставляет значения по умолчанию', () => {
-    const c = loadConfig({ DATABASE_URL: 'postgres://x' });
+    const c = loadConfig({ DATABASE_URL: 'postgres://x', ENCRYPTION_KEY: 'k' });
     expect(c.PORT).toBe(3000);
     expect(c.LOG_LEVEL).toBe('info');
+    expect(c.MOCK_PROVIDER_ENABLED).toBe(false);
   });
 });

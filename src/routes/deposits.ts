@@ -1,8 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { Pool } from '../db/pool.js';
 import { siteAuth } from '../auth.js';
-import { routeDeposit, getTransaction, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
+import { routeDeposit, getTransaction, serializeTx, IdempotencyConflictError } from '../routing/router.js';
+import { submitPending, type PaymentDeps } from '../payments/flow.js';
 
 // Суммы — целые числа в минорных единицах (центы). Принимаем число или строку из цифр.
 const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER), z.string().regex(/^[1-9]\d{0,17}$/)])
@@ -11,6 +11,8 @@ const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 const depositBody = z.object({
   amount: money,
   currency: z.string().regex(/^[A-Z]{3}$/, 'Код валюты ISO 4217, например EUR'),
+  returnUrl: z.string().url().max(2000).refine((u) => u.startsWith('https://') || u.startsWith('http://localhost'),
+    'Только https://').nullable().default(null),
   player: z.object({
     id: z.string().min(1).max(128),
     country: z.string().regex(/^[A-Z]{2}$/, 'Код страны ISO 3166-1, например MT'),
@@ -22,21 +24,8 @@ const depositBody = z.object({
 
 const idempotencyKey = z.string().min(8).max(128).regex(/^[\w.:-]+$/);
 
-export function serializeTx(tx: TransactionView) {
-  return {
-    id: tx.id,
-    type: tx.type,
-    status: tx.status,
-    amount: tx.amount.toString(),
-    currency: tx.currency,
-    declineCode: tx.declineCode,
-    createdAt: tx.createdAt.toISOString(),
-    updatedAt: tx.updatedAt.toISOString(),
-  };
-}
-
-export async function depositRoutes(app: FastifyInstance, opts: { pool: Pool }) {
-  const { pool } = opts;
+export async function depositRoutes(app: FastifyInstance, deps: PaymentDeps) {
+  const { pool } = deps;
   app.addHook('preHandler', siteAuth(pool));
 
   app.post('/v1/deposits', async (req, reply) => {
@@ -54,11 +43,16 @@ export async function depositRoutes(app: FastifyInstance, opts: { pool: Pool }) 
     try {
       const { tx, replayed } = await routeDeposit(pool, {
         siteId: req.site!.siteId, operatorId: req.site!.operatorId, idempotencyKey: key.data,
-        amount: b.amount, currency: b.currency,
+        amount: b.amount, currency: b.currency, returnUrl: b.returnUrl,
         player: { externalId: b.player.id, country: b.player.country, kyc: b.player.kyc,
           depositLimitDaily: b.player.depositLimitDaily, selfExcluded: b.player.selfExcluded },
       });
-      return reply.code(replayed ? 200 : 201).send(serializeTx(tx));
+      if (replayed) {
+        return reply.code(200).send(serializeTx((await getTransaction(pool, req.site!.siteId, tx.id)) ?? tx));
+      }
+      // Резерв уже закоммичен — теперь, вне транзакции, отправляем платёж провайдеру.
+      const final = tx.status === 'pending' ? await submitPending(deps, tx.id) : tx;
+      return reply.code(201).send(serializeTx(final));
     } catch (err) {
       if (err instanceof IdempotencyConflictError) {
         return reply.code(409).send({ error: { code: 'idempotency_conflict', message: err.message } });

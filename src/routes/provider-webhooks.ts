@@ -1,0 +1,28 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { InvalidWebhookError } from '../providers/types.js';
+import { handleProviderWebhook, type PaymentDeps } from '../payments/flow.js';
+
+/**
+ * Приём вебхуков от провайдеров: POST /v1/provider-webhooks/:accountId
+ * Тело читаем как сырую строку — подпись считается именно от неё, байт в байт.
+ */
+export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentDeps) {
+  app.addContentTypeParser('application/json', { parseAs: 'string', bodyLimit: 64 * 1024 },
+    (_req, body, done) => done(null, body));
+
+  app.post<{ Params: { accountId: string } }>('/v1/provider-webhooks/:accountId', async (req, reply) => {
+    const id = z.string().uuid().safeParse(req.params.accountId);
+    if (!id.success || typeof req.body !== 'string') return reply.code(400).send({ error: { code: 'bad_request', message: 'Неверный запрос' } });
+    try {
+      const result = await handleProviderWebhook(deps, id.data, req.headers, req.body);
+      return { received: true, result };
+    } catch (err) {
+      if (err instanceof InvalidWebhookError) {
+        req.log.warn({ accountId: id.data, reason: err.message }, 'Отклонён вебхук провайдера');
+        return reply.code(401).send({ error: { code: 'invalid_signature', message: 'Вебхук не прошёл проверку' } });
+      }
+      throw err;
+    }
+  });
+}
