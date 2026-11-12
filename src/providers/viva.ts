@@ -56,6 +56,13 @@ export function parseVivaCredentials(secret: string): VivaCredentials {
   return c as VivaCredentials;
 }
 
+/** RequestAmount Viva — десятичное число в единицах валюты (5.00 = 500 центов). Разбираем строкой, без float. */
+export function parseVivaAmount(text: string): bigint | null {
+  const m = /"RequestAmount"\s*:\s*"?(\d{1,15})(?:\.(\d{1,2})\d*)?"?/i.exec(text);
+  if (!m) return null;
+  return BigInt(m[1]!) * 100n + BigInt((m[2] ?? '').padEnd(2, '0'));
+}
+
 const basic = (user: string, pass: string) => 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 
 /** orderCode — 16-значное число: достаём строкой, чтобы не потерять точность в JSON.parse. */
@@ -138,7 +145,8 @@ export class VivaAdapter implements ProviderAdapter {
     return { kind: 'redirect', providerRef: orderCode, redirectUrl: `${HOSTS[c.env].www}/web/checkout?ref=${orderCode}` };
   }
 
-  async getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
+  /** Заказ Viva: GET /api/orders/<orderCode> → StateId и RequestAmount (в евро с копейками, например 5.00). */
+  private async order(creds: AccountCredentials, providerRef: string): Promise<{ state: number; amount: bigint | null }> {
     const c = parseVivaCredentials(creds.secret);
     if (!/^\d{6,20}$/.test(providerRef)) throw new VivaError('Неверный orderCode');
     const res = await this.http(`${HOSTS[c.env].www}/api/orders/${providerRef}`, {
@@ -147,12 +155,21 @@ export class VivaAdapter implements ProviderAdapter {
     const text = await res.text();
     if (!res.ok) throw new VivaError(`Viva order status: HTTP ${res.status}`, res.status);
     const state = Number(/"StateId"\s*:\s*(\d+)/i.exec(text)?.[1] ?? NaN);
+    return { state, amount: parseVivaAmount(text) };
+  }
+
+  async getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
+    const { state } = await this.order(creds, providerRef);
     switch (state) {
       case 3: return 'success';
       case 1: case 2: return 'declined';
       case 0: return 'pending';
-      default: throw new VivaError(`Viva order status: неизвестный StateId (${text.slice(0, 120)})`);
+      default: throw new VivaError(`Viva order status: неизвестный StateId (${state})`);
     }
+  }
+
+  async paidAmount(creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
+    return (await this.order(creds, providerRef)).amount;
   }
 
   verifyWebhook(creds: AccountCredentials, _headers: Record<string, string | string[] | undefined>, rawBody: string,

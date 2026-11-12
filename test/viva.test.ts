@@ -1,7 +1,7 @@
 // Адаптер Viva Wallet на имитации их API: настоящие запросы в Viva в тестах не уходят.
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { VivaAdapter, parseVivaCredentials, type HttpFetch } from '../src/providers/viva.js';
+import { VivaAdapter, parseVivaCredentials, parseVivaAmount, type HttpFetch } from '../src/providers/viva.js';
 import { InvalidWebhookError, ProviderRegistry } from '../src/providers/types.js';
 import { createPool, type Pool } from '../src/db/pool.js';
 import { migrate } from '../src/db/migrate.js';
@@ -18,6 +18,7 @@ const creds = { accountId: 'acc', secret: SECRET };
 function fakeViva() {
   const calls: { url: string; method: string; headers: Record<string, string>; body?: string }[] = [];
   const orders = new Map<string, number>(); // orderCode → StateId
+  const amounts = new Map<string, number>(); // orderCode → сумма в центах, как её передали
   let next = 2271655739472609n; // 16 цифр, как у Viva
   let tokenIssued = 0;
   const state = { failCreateWith: 0, failStatusWith: 0 };
@@ -34,18 +35,22 @@ function fakeViva() {
       if (!init.headers.authorization?.startsWith('Bearer tok')) return respond(401, {});
       const code = (next++).toString();
       orders.set(code, 0);
+      amounts.set(code, JSON.parse(init.body!).amount);
       return respond(200, `{"orderCode":${code}}`); // число без кавычек, как в ответе Viva
     }
     const m = /^https:\/\/demo\.vivapayments\.com\/api\/orders\/(\d+)$/.exec(url);
     if (m) {
       if (state.failStatusWith) return respond(state.failStatusWith, {});
       if (init.headers.authorization !== 'Basic ' + Buffer.from('mid:akey').toString('base64')) return respond(401, {});
-      return orders.has(m[1]!) ? respond(200, `{"OrderCode":${m[1]},"StateId":${orders.get(m[1]!)},"RequestAmount":10.00}`) : respond(404, {});
+      if (!orders.has(m[1]!)) return respond(404, {});
+      const cents = amounts.get(m[1]!)!;
+      // Viva отдаёт сумму в евро с двумя знаками, как в реальном ответе: "RequestAmount":5.00
+      return respond(200, `{"OrderCode":${m[1]},"RequestAmount":${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')},"StateId":${orders.get(m[1]!)}}`);
     }
     if (url === 'https://demo.vivapayments.com/api/messages/config/token') return respond(200, { Key: 'VIVA-VERIFY-KEY' });
     return respond(404, {});
   };
-  return { fetch, calls, orders, state, tokenCount: () => tokenIssued };
+  return { fetch, calls, orders, amounts, state, tokenCount: () => tokenIssued };
 }
 
 const req = (amount = 2500n) => ({ reference: 'attempt-1', amount, currency: 'EUR', country: 'MT', returnUrl: null });
@@ -102,6 +107,14 @@ describe('Viva: адаптер', () => {
     }
   });
 
+  it('сумма Viva разбирается без потери точности', () => {
+    expect(parseVivaAmount('{"RequestAmount":5.00,"StateId":3}')).toBe(500n);
+    expect(parseVivaAmount('{"RequestAmount":25.5}')).toBe(2550n);
+    expect(parseVivaAmount('{"RequestAmount":1234567.89}')).toBe(123456789n);
+    expect(parseVivaAmount('{"RequestAmount":7}')).toBe(700n);
+    expect(parseVivaAmount('{"StateId":3}')).toBeNull();
+  });
+
   it('вебхук без токена или с чужим токеном отклоняется', () => {
     const a = new VivaAdapter({ fetch: fakeViva().fetch });
     const body = '{"EventData":{"OrderCode":2271655739472609,"StatusId":"F"},"MessageId":"m-1","EventTypeId":1796}';
@@ -143,7 +156,7 @@ describe.skipIf(!url)('Viva: сквозной платёж через роуте
   afterAll(async () => { await app?.close(); await pool?.end(); });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE webhook_deliveries, provider_webhook_events, ledger_entries, transaction_attempts, transactions,
+    await pool.query(`TRUNCATE reconciliation_issues, webhook_deliveries, provider_webhook_events, ledger_entries, transaction_attempts, transactions,
       account_usage, players, merchant_accounts, sites, providers, operators CASCADE`);
     const op = (await pool.query(`INSERT INTO operators (name, licenses, platform_fee_bps) VALUES ('Op', '{MT}', 150) RETURNING id`)).rows[0].id;
     const k = generateApiKey(); key = k.key;
@@ -183,6 +196,17 @@ describe.skipIf(!url)('Viva: сквозной платёж через роуте
     const before = v.calls.length;
     expect((await hook('2271655739472609', 'wh_' + 'z'.repeat(30))).statusCode).toBe(401);
     expect(v.calls.length).toBe(before);
+  });
+
+  it('оплачена не та сумма — не зачисляем, проблема для ручного разбора', async () => {
+    const d = await deposit();
+    v.orders.set('2271655739472609', 3);
+    v.amounts.set('2271655739472609', 250); // Viva говорит: оплачено 2.50 вместо 25.00
+    expect((await hook('2271655739472609')).json().result).toBe('issue_recorded');
+    expect((await pool.query(`SELECT status FROM transactions WHERE id = $1`, [d.id])).rows[0].status).toBe('pending');
+    const i = (await pool.query(`SELECT kind, details FROM reconciliation_issues`)).rows[0];
+    expect(i.kind).toBe('amount_mismatch');
+    expect(i.details).toMatch(/25\.00 EUR.*2\.50/);
   });
 
   it('Viva проверяет адрес вебхука GET-запросом и получает ключ', async () => {
