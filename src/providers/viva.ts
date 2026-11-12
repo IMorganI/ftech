@@ -182,6 +182,7 @@ export class VivaAdapter implements ProviderAdapter {
   /**
    * Возврат на карту: находим платёжную транзакцию заказа (CardCharge, статус F) и вызываем
    * DELETE /api/transactions/<id>/?amount=<центы>. Частичный возврат разрешён, но не больше суммы оплаты.
+   * Viva возвращает деньги из доступного баланса мерчанта: если он пуст — отказ, часть выплаты станет ручной.
    */
   async refund(creds: AccountCredentials, req: RefundRequest): Promise<RefundResult> {
     const c = parseVivaCredentials(creds.secret);
@@ -202,8 +203,15 @@ export class VivaAdapter implements ProviderAdapter {
     let body: { Success?: boolean; StatusId?: string; TransactionId?: string; ErrorText?: string | null; ErrorCode?: number } = {};
     try { body = JSON.parse(text); } catch { /* пусто или не JSON */ }
     if (res.status >= 500 || res.status === 429 || res.status === 401) throw new VivaError(`Viva refund: HTTP ${res.status}`, res.status);
-    if (res.ok && body.Success !== false && body.StatusId === 'F') return { kind: 'success', refundRef: body.TransactionId };
-    return { kind: 'declined', reason: `viva_refund: ${body.ErrorText ?? vivaErrorText(res.status, text)}`.slice(0, 300) };
+    // Успех — только явный: Success = true и ErrorCode = 0 (HTTP 200 бывает и при отказе).
+    if (res.ok && body.Success === true && (body.ErrorCode ?? 0) === 0) return { kind: 'success', refundRef: body.TransactionId };
+    const known: Record<string, string> = {
+      PaymentsInsufficientFundsForReversal: 'на балансе Viva недостаточно средств для возврата (оплаты ещё не прошли клиринг или баланс выведен)',
+      PaymentsInvalidAmountForVoid: 'сумма возврата больше невозвращённой части оплаты',
+      PaymentsNonReversibleTransaction: 'оплата уже возвращена или не подлежит возврату',
+    };
+    const err = body.ErrorText ?? '';
+    return { kind: 'declined', reason: `viva_refund: ${known[err] ? `${known[err]} (${err})` : err || vivaErrorText(res.status, text)}`.slice(0, 300) };
   }
 
   verifyWebhook(creds: AccountCredentials, _headers: Record<string, string | string[] | undefined>, rawBody: string,

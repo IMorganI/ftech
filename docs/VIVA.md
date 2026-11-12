@@ -62,6 +62,13 @@ GitHub → аватарка → **Settings → Codespaces → Secrets → New se
 | вебхук `Inactive` в кабинете Viva | Нажми Edit → включи; при включении Viva заново проверяет адрес (порт должен быть Public) |
 | Вебхук активен, но POST не приходит | В Codespaces туннель GitHub может не пропускать запросы Viva; платёж всё равно подтвердит сверка через ~1 минуту. На постоянном хостинге этой проблемы нет |
 
+## Возвраты и баланс
+
+Viva делает возвраты **из доступного баланса** мерчанта. Пока оплаты не прошли клиринг (или если
+баланс выведен в банк), возврат отклоняется с `PaymentsInsufficientFundsForReversal` — тогда эта
+часть выплаты автоматически становится ручной. Поэтому оператору стоит держать на Viva запас под
+выплаты. Успехом возврата считается только ответ с `Success = true` и `ErrorCode = 0`.
+
 ## 5. Проверка
 
 **Тест-платёж** в борде → «Открыть страницу оплаты» → откроется Viva Smart Checkout (demo).
@@ -77,7 +84,7 @@ GitHub → аватарка → **Settings → Codespaces → Secrets → New se
 | Страница оплаты | `{www}/web/checkout?ref=<orderCode>` |
 | Статус | `GET {www}/api/orders/<orderCode>`, Basic merchantId:apiKey → `StateId` 0 ждёт, 1 истёк, 2 отменён, 3 оплачен |
 | Найти оплату заказа | `GET {www}/api/transactions?ordercode=<orderCode>`, Basic → `Transactions[]`, берём `TransactionType.TransactionTypeId = 5` (CardCharge) и `StatusId = F` |
-| Возврат (для выплат) | `DELETE {www}/api/transactions/<TransactionId>/?amount=<сумма>&sourceCode=…`, Basic → `Success`, `StatusId` F/E, `ErrorText` (например `PaymentsInvalidAmountForVoid` — больше остатка) |
+| Возврат (для выплат) | `DELETE {www}/api/transactions/<TransactionId>/?amount=<центы>&sourceCode=…`, Basic → `Success`, `StatusId` F/E, `ErrorText` (например `PaymentsInvalidAmountForVoid` — больше остатка) |
 | Ключ вебхука | `GET {www}/api/messages/config/token`, Basic merchantId:apiKey → `{ Key }` |
 
 Хосты demo: `demo-accounts.vivapayments.com`, `demo-api.vivapayments.com`, `demo.vivapayments.com`;

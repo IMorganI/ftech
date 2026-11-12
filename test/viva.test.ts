@@ -22,7 +22,7 @@ function fakeViva() {
   const refunds = new Map<string, number>(); // orderCode → сколько вернули (центы)
   let next = 2271655739472609n; // 16 цифр, как у Viva
   let tokenIssued = 0;
-  const state = { failCreateWith: 0, failStatusWith: 0, failRefundWith: 0 };
+  const state = { failCreateWith: 0, failStatusWith: 0, failRefundWith: 0, refundBody: null as null | object };
   const respond = (status: number, body: unknown) => ({ ok: status < 300, status, text: async () => typeof body === 'string' ? body : JSON.stringify(body) });
   const fetch: HttpFetch = async (url, init) => {
     calls.push({ url, method: init.method, headers: init.headers, body: init.body });
@@ -59,6 +59,7 @@ function fakeViva() {
     const rf = /^https:\/\/demo\.vivapayments\.com\/api\/transactions\/tx-(\d+)\/\?(.*)$/.exec(url);
     if (rf && init.method === 'DELETE') {
       if (state.failRefundWith) return respond(state.failRefundWith, '');
+      if (state.refundBody) return respond(200, state.refundBody);
       const code = rf[1]!; const amt = Number(new URLSearchParams(rf[2]).get('amount'));
       const left = amounts.get(code)! - (refunds.get(code) ?? 0);
       if (amt > left) return respond(400, { ErrorCode: 400, ErrorText: 'PaymentsInvalidAmountForVoid', Success: false, StatusId: 'E' });
@@ -158,7 +159,11 @@ describe('Viva: адаптер', () => {
     expect(await rr(1000n)).toEqual({ kind: 'success', refundRef: 'rf-1' });
     const del = v.calls.find((x) => x.method === 'DELETE')!;
     expect(del.url).toBe(`https://demo.vivapayments.com/api/transactions/tx-${ref}/?amount=1000&sourceCode=1234`);
-    expect(await rr(2000n)).toEqual({ kind: 'declined', reason: 'viva_refund: PaymentsInvalidAmountForVoid' }); // больше остатка
+    expect(await rr(2000n)).toMatchObject({ kind: 'declined', reason: expect.stringMatching(/больше невозвращённой.*PaymentsInvalidAmountForVoid/) });
+    // Реальный ответ demo-аккаунта с пустым балансом: HTTP 200, но Success = false
+    v.state.refundBody = { StatusId: 'E', ErrorCode: 452, ErrorText: 'PaymentsInsufficientFundsForReversal', Success: false };
+    expect(await rr(100n)).toMatchObject({ kind: 'declined', reason: expect.stringMatching(/недостаточно средств/) });
+    v.state.refundBody = null;
     v.state.failRefundWith = 503;
     await expect(rr(100n)).rejects.toThrow(/503/);
   });
