@@ -26,6 +26,19 @@ export type CreatePaymentResult =
 
 export type ProviderStatus = 'pending' | 'success' | 'declined';
 
+export interface RefundRequest {
+  /** Наш ID платежа у провайдера (тот, что вернул createPayment). */
+  providerRef: string;
+  amount: bigint;
+  currency: string;
+  /** Наш ID части выплаты — для отчётов провайдера. */
+  reference: string;
+}
+
+/** Возврат на карту: success — деньги ушли, declined — провайдер явно отказал (тогда часть станет ручной).
+ *  Сетевая ошибка — исключение: неизвестно, прошёл ли возврат, это разбирает человек. */
+export type RefundResult = { kind: 'success'; refundRef?: string } | { kind: 'declined'; reason: string };
+
 export interface VerifiedWebhook {
   eventId: string;
   providerRef: string;
@@ -42,6 +55,8 @@ export interface ProviderAdapter {
    *  Не прошёл проверку — InvalidWebhookError. */
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string,
     query?: Record<string, unknown>): VerifiedWebhook;
+  /** Возврат (полный или частичный) по успешной оплате — основа выплат по closed loop. */
+  refund?(creds: AccountCredentials, req: RefundRequest): Promise<RefundResult>;
   /** Сколько фактически оплачено (в минорных единицах), если провайдер это сообщает. null — неизвестно. */
   paidAmount?(creds: AccountCredentials, providerRef: string): Promise<bigint | null>;
   /** Если провайдер проверяет адрес вебхука GET-запросом (как Viva) — что ему ответить. */

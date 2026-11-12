@@ -5,6 +5,7 @@ import type { SecretStore } from './secrets.js';
 import type { ProviderRegistry } from './providers/types.js';
 import type { MockProvider } from './providers/mock.js';
 import { depositRoutes } from './routes/deposits.js';
+import { payoutRoutes } from './routes/payouts.js';
 import { providerWebhookRoutes } from './routes/provider-webhooks.js';
 import { mockProviderRoutes } from './routes/mock-provider.js';
 import { adminPlugin } from './admin/index.js';
@@ -70,6 +71,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
         }),
       });
       await api.register(depositRoutes, payment);
+      await api.register(payoutRoutes, payment);
     });
 
     // Вебхуки провайдеров: без ключа сайта, защищены подписью провайдера.

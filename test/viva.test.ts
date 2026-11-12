@@ -19,9 +19,10 @@ function fakeViva() {
   const calls: { url: string; method: string; headers: Record<string, string>; body?: string }[] = [];
   const orders = new Map<string, number>(); // orderCode → StateId
   const amounts = new Map<string, number>(); // orderCode → сумма в центах, как её передали
+  const refunds = new Map<string, number>(); // orderCode → сколько вернули (центы)
   let next = 2271655739472609n; // 16 цифр, как у Viva
   let tokenIssued = 0;
-  const state = { failCreateWith: 0, failStatusWith: 0 };
+  const state = { failCreateWith: 0, failStatusWith: 0, failRefundWith: 0, refundBody: null as null | object };
   const respond = (status: number, body: unknown) => ({ ok: status < 300, status, text: async () => typeof body === 'string' ? body : JSON.stringify(body) });
   const fetch: HttpFetch = async (url, init) => {
     calls.push({ url, method: init.method, headers: init.headers, body: init.body });
@@ -47,10 +48,28 @@ function fakeViva() {
       // Viva отдаёт сумму в евро с двумя знаками, как в реальном ответе: "RequestAmount":5.00
       return respond(200, `{"OrderCode":${m[1]},"RequestAmount":${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, '0')},"StateId":${orders.get(m[1]!)}}`);
     }
+    const tl = /^https:\/\/demo\.vivapayments\.com\/api\/transactions\?ordercode=(\d+)$/.exec(url);
+    if (tl) {
+      const code = tl[1]!;
+      const paid = orders.get(code) === 3;
+      // Реальная форма ответа Viva (сокращённо), получена на demo-аккаунте
+      return respond(200, { Transactions: paid ? [{ TransactionId: `tx-${code}`, StatusId: 'F', Amount: amounts.get(code)! / 100,
+        TransactionType: { Name: 'CardCharge', TransactionTypeId: 5 } }] : [], ErrorCode: 0, Success: true });
+    }
+    const rf = /^https:\/\/demo\.vivapayments\.com\/api\/transactions\/tx-(\d+)\/\?(.*)$/.exec(url);
+    if (rf && init.method === 'DELETE') {
+      if (state.failRefundWith) return respond(state.failRefundWith, '');
+      if (state.refundBody) return respond(200, state.refundBody);
+      const code = rf[1]!; const amt = Number(new URLSearchParams(rf[2]).get('amount'));
+      const left = amounts.get(code)! - (refunds.get(code) ?? 0);
+      if (amt > left) return respond(400, { ErrorCode: 400, ErrorText: 'PaymentsInvalidAmountForVoid', Success: false, StatusId: 'E' });
+      refunds.set(code, (refunds.get(code) ?? 0) + amt);
+      return respond(200, { TransactionId: `rf-${refunds.size}`, StatusId: 'F', Amount: amt / 100, ErrorCode: 0, ErrorText: null, Success: true });
+    }
     if (url === 'https://demo.vivapayments.com/api/messages/config/token') return respond(200, { Key: 'VIVA-VERIFY-KEY' });
     return respond(404, {});
   };
-  return { fetch, calls, orders, amounts, state, tokenCount: () => tokenIssued };
+  return { fetch, calls, orders, amounts, refunds, state, tokenCount: () => tokenIssued };
 }
 
 const req = (amount = 2500n) => ({ reference: 'attempt-1', amount, currency: 'EUR', country: 'MT', returnUrl: null });
@@ -129,6 +148,26 @@ describe('Viva: адаптер', () => {
     await expect(a.webhookChallenge(creds, {})).rejects.toThrow(InvalidWebhookError);
   });
 
+  it('возврат: находит платёжную транзакцию по коду заказа и возвращает сумму в центах', async () => {
+    const v = fakeViva();
+    const a = new VivaAdapter({ fetch: v.fetch });
+    const r = await a.createPayment(creds, req(2500n));
+    const ref = r.kind === 'redirect' ? r.providerRef : '';
+    const rr = (amount: bigint) => a.refund(creds, { providerRef: ref, amount, currency: 'EUR', reference: 'leg-1' });
+    expect(await rr(100n)).toMatchObject({ kind: 'declined' }); // не оплачен — возвращать нечего
+    v.orders.set(ref, 3);
+    expect(await rr(1000n)).toEqual({ kind: 'success', refundRef: 'rf-1' });
+    const del = v.calls.find((x) => x.method === 'DELETE')!;
+    expect(del.url).toBe(`https://demo.vivapayments.com/api/transactions/tx-${ref}/?amount=1000&sourceCode=1234`);
+    expect(await rr(2000n)).toMatchObject({ kind: 'declined', reason: expect.stringMatching(/больше невозвращённой.*PaymentsInvalidAmountForVoid/) });
+    // Реальный ответ demo-аккаунта с пустым балансом: HTTP 200, но Success = false
+    v.state.refundBody = { StatusId: 'E', ErrorCode: 452, ErrorText: 'PaymentsInsufficientFundsForReversal', Success: false };
+    expect(await rr(100n)).toMatchObject({ kind: 'declined', reason: expect.stringMatching(/недостаточно средств/) });
+    v.state.refundBody = null;
+    v.state.failRefundWith = 503;
+    await expect(rr(100n)).rejects.toThrow(/503/);
+  });
+
   it('понятные ошибки в секрете', () => {
     expect(() => parseVivaCredentials('not json')).toThrow(/JSON/);
     expect(() => parseVivaCredentials('{"env":"demo"}')).toThrow(/clientId/);
@@ -156,7 +195,7 @@ describe.skipIf(!url)('Viva: сквозной платёж через роуте
   afterAll(async () => { await app?.close(); await pool?.end(); });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE reconciliation_issues, webhook_deliveries, provider_webhook_events, ledger_entries, transaction_attempts, transactions,
+    await pool.query(`TRUNCATE payout_legs, reconciliation_issues, webhook_deliveries, provider_webhook_events, ledger_entries, transaction_attempts, transactions,
       account_usage, players, merchant_accounts, sites, providers, operators CASCADE`);
     const op = (await pool.query(`INSERT INTO operators (name, licenses, platform_fee_bps) VALUES ('Op', '{MT}', 150) RETURNING id`)).rows[0].id;
     const k = generateApiKey(); key = k.key;
@@ -207,6 +246,18 @@ describe.skipIf(!url)('Viva: сквозной платёж через роуте
     const i = (await pool.query(`SELECT kind, details FROM reconciliation_issues`)).rows[0];
     expect(i.kind).toBe('amount_mismatch');
     expect(i.details).toMatch(/25\.00 EUR.*2\.50/);
+  });
+
+  it('выплата игроку через Viva: возврат на карту депозита', async () => {
+    const d = await deposit();
+    v.orders.set('2271655739472609', 3);
+    await hook('2271655739472609');
+    const po = (await app.inject({ method: 'POST', url: '/v1/payouts',
+      headers: { authorization: `Bearer ${key}`, 'idempotency-key': 'viva-payout-1' },
+      payload: { amount: 1500, currency: 'EUR', player: { id: 'p1' } } })).json();
+    expect(po).toMatchObject({ status: 'success', refundAmount: '1500', manualAmount: '0' });
+    expect(v.refunds.get('2271655739472609')).toBe(1500);
+    expect((await pool.query(`SELECT refunded_amount FROM transactions WHERE id = $1`, [d.id])).rows[0].refunded_amount).toBe(1500n);
   });
 
   it('Viva проверяет адрес вебхука GET-запросом и получает ключ', async () => {

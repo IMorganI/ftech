@@ -26,6 +26,7 @@ const ISSUE_TEXT: Record<string, string> = {
   late_success: 'провайдер подтвердил оплату по попытке, которую мы уже закрыли',
   status_mismatch: 'статус у провайдера не совпадает с нашим',
   amount_mismatch: 'оплачена не та сумма',
+  refund_unknown: 'нет ответа провайдера при возврате — проверь, ушли ли деньги',
 };
 
 export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert[]> {
@@ -45,6 +46,14 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
        WHERE w.status = 'failed' AND w.created_at > now() - interval '7 days') k
      WHERE ${sent} ORDER BY key LIMIT 20`)).rows) {
     out.push({ key: r.key, text: `📭 Сайт «${r.site}» не получил уведомление ${r.event} после всех попыток (${r.last_error ?? 'ошибка'}).\nПроверь адрес вебхука: ${boardUrl}#sites` });
+  }
+
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'manual_payout:' || l.id AS key, l.amount, t.currency, s.name AS site, p.external_id AS player
+       FROM payout_legs l JOIN transactions t ON t.id = l.payout_id JOIN sites s ON s.id = t.site_id JOIN players p ON p.id = t.player_id
+       WHERE l.kind = 'manual' AND l.status = 'pending') k
+     WHERE ${sent} ORDER BY key LIMIT 20`)).rows) {
+    out.push({ key: r.key, text: `💸 Нужна ручная выплата: ${money(r.amount, r.currency)} игроку ${r.player} (сайт «${r.site}»). Сверх возвратов на карту — переведи сам и отметь в борде: ${boardUrl}#manual` });
   }
 
   for (const r of (await pool.query(

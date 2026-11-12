@@ -8,6 +8,7 @@ import { MockAdapter, MockProvider } from './providers/mock.js';
 import { VivaAdapter } from './providers/viva.js';
 import { dispatchOnce } from './webhooks/outbox.js';
 import { reconcilePending } from './payments/flow.js';
+import { resumePayouts } from './payouts/payouts.js';
 import { TelegramSender } from './notify/telegram.js';
 import { notifyOnce } from './notify/alerts.js';
 
@@ -52,6 +53,7 @@ if (config.WORKERS_ENABLED) {
     const tg = new TelegramSender(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
     loop('telegram', 30_000, () => notifyOnce(pool, tg, `${config.PUBLIC_BASE_URL}/admin`));
   }
+  loop('payouts', 30_000, () => resumePayouts({ pool, providers, secrets }));
   loop('reconcile', 20_000, () => reconcilePending({ pool, providers, secrets }, config.RECONCILE_AFTER_SEC));
 }
 
