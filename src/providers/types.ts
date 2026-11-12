@@ -38,8 +38,12 @@ export interface ProviderAdapter {
   createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult>;
   /** Статус у провайдера. Используется и после вебхука: содержимому вебхука на слово не верим. */
   getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus>;
-  /** Проверяет подпись входящего вебхука и достаёт из него ID. Неверная подпись — InvalidWebhookError. */
-  verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string): VerifiedWebhook;
+  /** Проверяет подлинность входящего вебхука (подпись или секретный токен в адресе) и достаёт из него ID.
+   *  Не прошёл проверку — InvalidWebhookError. */
+  verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string,
+    query?: Record<string, unknown>): VerifiedWebhook;
+  /** Если провайдер проверяет адрес вебхука GET-запросом (как Viva) — что ему ответить. */
+  webhookChallenge?(creds: AccountCredentials, query: Record<string, unknown>): Promise<unknown>;
 }
 
 export class ProviderRegistry {

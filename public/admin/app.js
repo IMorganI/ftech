@@ -359,7 +359,8 @@ function accountCard(a) {
       h('span', null, 'Лимит в месяц'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'нет'),
       h('span', null, 'Комиссия провайдера'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
       h('span', null, 'Приоритет'), h('span', null, a.priority),
-      h('span', null, 'Переключать на'), h('span', null, `${mark}% лимита`)),
+      h('span', null, 'Переключать на'), h('span', null, `${mark}% лимита`),
+      can('admin') ? [h('span', null, 'ID'), h('span', { class: 'id-cell', title: 'Нужен для адреса вебхука провайдера' }, a.id)] : null),
     h('div', { class: 'tags' }, a.currencies.map((c) => h('span', { class: 'tag' }, c)), a.countries.map((c) => h('span', { class: 'tag' }, c))));
 
   if (can('operator')) {
@@ -632,7 +633,7 @@ async function viewSetup(main) {
       h('h2', null, 'Провайдеры'),
       h('table', null, h('thead', null, h('tr', null, ['Название', 'Код', 'Адаптер'].map((t) => h('th', null, t)))),
         h('tbody', null, provs.map((p) => h('tr', null, h('td', null, p.name), h('td', { class: 'n' }, p.code), h('td', { class: 'n' }, p.adapter))))),
-      h('p', { class: 'note' }, 'Адаптер — модуль интеграции в коде сервера. Сейчас подключён mock.'),
+      h('p', { class: 'note' }, 'Адаптер — модуль интеграции в коде сервера. Доступны: viva (Viva Wallet), mock (тестовый).'),
       actionForm({ class: 'form' }, [
         field('Название', h('input', { name: 'name', required: true })),
         field('Код', h('input', { name: 'code', required: true, placeholder: 'viva' })),

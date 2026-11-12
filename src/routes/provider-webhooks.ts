@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { InvalidWebhookError } from '../providers/types.js';
-import { handleProviderWebhook, type PaymentDeps } from '../payments/flow.js';
+import { handleProviderWebhook, providerWebhookChallenge, type PaymentDeps } from '../payments/flow.js';
 
 /**
  * Приём вебхуков от провайдеров: POST /v1/provider-webhooks/:accountId
@@ -15,13 +15,26 @@ export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentD
     const id = z.string().uuid().safeParse(req.params.accountId);
     if (!id.success || typeof req.body !== 'string') return reply.code(400).send({ error: { code: 'bad_request', message: 'Неверный запрос' } });
     try {
-      const result = await handleProviderWebhook(deps, id.data, req.headers, req.body);
+      const result = await handleProviderWebhook(deps, id.data, req.headers, req.body, req.query as Record<string, unknown>);
       return { received: true, result };
     } catch (err) {
       if (err instanceof InvalidWebhookError) {
         req.log.warn({ accountId: id.data, reason: err.message }, 'Отклонён вебхук провайдера');
         return reply.code(401).send({ error: { code: 'invalid_signature', message: 'Вебхук не прошёл проверку' } });
       }
+      throw err;
+    }
+  });
+
+  // Некоторые провайдеры (Viva) при настройке вебхука проверяют адрес GET-запросом.
+  app.get<{ Params: { accountId: string } }>('/v1/provider-webhooks/:accountId', async (req, reply) => {
+    const id = z.string().uuid().safeParse(req.params.accountId);
+    if (!id.success) return reply.code(404).send();
+    try {
+      const body = await providerWebhookChallenge(deps, id.data, req.query as Record<string, unknown>);
+      return body === null ? reply.code(404).send() : body;
+    } catch (err) {
+      if (err instanceof InvalidWebhookError) return reply.code(401).send({ error: { code: 'invalid_token', message: 'Неверный адрес вебхука' } });
       throw err;
     }
   });

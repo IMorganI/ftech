@@ -27,7 +27,14 @@ export interface AppDeps {
 export function buildApp(deps: AppDeps = {}): FastifyInstance {
   const app = Fastify({
     logger: deps.logLevel
-      ? { level: deps.logLevel, redact: ['req.headers.authorization'] } // ключи сайтов никогда не попадают в логи
+      ? {
+          level: deps.logLevel,
+          redact: ['req.headers.authorization'], // ключи сайтов никогда не попадают в логи
+          serializers: {
+            // Секретный токен из адреса вебхука провайдера тоже не пишем в логи.
+            req: (r: { method: string; url: string; ip?: string }) => ({ method: r.method, url: r.url.replace(/token=[^&]*/g, 'token=***'), ip: r.ip }),
+          },
+        }
       : false,
     bodyLimit: 64 * 1024,
     trustProxy: deps.trustProxy ?? false,
