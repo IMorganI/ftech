@@ -317,6 +317,12 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
       return await withTransaction(pool, async (c) => {
         const before = (await c.query(`${ACCOUNT_SELECT} WHERE m.id = $1 FOR UPDATE OF m`, [id.data])).rows[0];
         if (!before) return fail(reply, 404, 'not_found', 'Аккаунт не найден');
+        if (b.enabled === true && !before.enabled) {
+          const keys = (await c.query(
+            `SELECT m.credentials_enc IS NOT NULL OR m.credentials_ref IS NOT NULL OR $2::text IS NOT NULL AS ok FROM merchant_accounts m WHERE m.id = $1`,
+            [id.data, b.credentialsRef ?? null])).rows[0];
+          if (!keys.ok) return fail(reply, 409, 'no_credentials', 'Сначала введи ключи провайдера в разделе «Подключения»');
+        }
         await c.query(
           `UPDATE merchant_accounts SET
              enabled = coalesce($2, enabled), daily_cap = coalesce($3, daily_cap),

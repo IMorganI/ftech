@@ -66,7 +66,7 @@ describe.skipIf(!url)('Подключения', () => {
   }
   beforeEach(() => setup());
 
-  const call = (method: 'GET' | 'POST' | 'PUT', path: string, payload?: object) =>
+  const call = (method: 'GET' | 'POST' | 'PUT' | 'PATCH', path: string, payload?: object) =>
     app.inject({ method, url: path, payload: method === 'GET' ? undefined : (payload ?? {}), cookies: { ftech_admin: cookie } });
 
   const newViva = async () => (await call('POST', '/admin/v1/connections/accounts', {
@@ -151,7 +151,9 @@ describe.skipIf(!url)('Подключения', () => {
 
   it('платёж через аккаунт с ключами из борды доходит до Viva', async () => {
     const { id } = await newViva();
+    expect((await call('PATCH', `/admin/v1/accounts/${id}`, { enabled: true })).statusCode).toBe(409); // без ключей не включить
     await call('PUT', `/admin/v1/accounts/${id}/credentials`, { values: KEYS });
+    expect((await call('PATCH', `/admin/v1/accounts/${id}`, { enabled: true })).statusCode).toBe(200);
     const k = generateApiKey();
     await pool.query(`INSERT INTO sites (operator_id, name, api_key_hash) VALUES ($1, 's', $2)`, [op, k.hash]);
     const d = (await app.inject({ method: 'POST', url: '/v1/deposits', headers: { authorization: `Bearer ${k.key}`, 'idempotency-key': 'conn-dep-1' },
@@ -171,10 +173,12 @@ describe.skipIf(!url)('Подключения', () => {
       .map((s: { key: string; done: boolean }) => [s.key, s.done]));
     expect(await steps()).toMatchObject({ account: false, keys: false, check: false, site: false, deposit: false });
     const { id } = await newViva();
-    expect(await steps()).toMatchObject({ account: true, keys: false });
+    expect(await steps()).toMatchObject({ account: true, keys: false, enabled: false });
     await call('PUT', `/admin/v1/accounts/${id}/credentials`, { values: KEYS });
     await call('POST', `/admin/v1/accounts/${id}/check`);
-    expect(await steps()).toMatchObject({ keys: true, check: true, site: false });
+    expect(await steps()).toMatchObject({ keys: true, check: true, enabled: false, site: false });
+    await call('PATCH', `/admin/v1/accounts/${id}`, { enabled: true });
+    expect(await steps()).toMatchObject({ enabled: true });
     const r = (await call('GET', `/admin/v1/operators/${op}/readiness`)).json();
     expect(r.ready).toBe(false);
   });

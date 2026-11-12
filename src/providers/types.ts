@@ -42,6 +42,8 @@ export type RefundResult = { kind: 'success'; refundRef?: string } | { kind: 'de
 export interface VerifiedWebhook {
   eventId: string;
   providerRef: string;
+  /** Тестовое событие из кабинета провайдера («Send test webhook»): подтверждает настройку, платежей не касается. */
+  test?: boolean;
 }
 
 export class InvalidWebhookError extends Error {}
@@ -56,6 +58,42 @@ export interface CredentialField {
   default?: string;
   placeholder?: string;
   help?: string;
+  /** На каком шаге подключения вводится: ключи API или вебхук (секрет подписи выдаётся провайдером после создания вебхука). */
+  stage?: 'keys' | 'webhook';
+}
+
+/**
+ * Как провайдер защищает вебхуки.
+ *  token     — провайдер не подписывает вебхуки; защищает только токен в нашем адресе (Viva).
+ *  signature — провайдер подписывает вебхуки секретом, который выдаёт после создания вебхука в кабинете;
+ *              этот секрет вводится в поле со stage: 'webhook' (так у большинства: Stripe, Checkout.com, Nuvei…).
+ *              Токен в адресе проверяется тоже — второй слой.
+ *  internal  — тестовый провайдер внутри сервера, настраивать нечего.
+ */
+export type WebhookScheme = 'token' | 'signature' | 'internal';
+
+/**
+ * Карточка провайдера: всё, что борде нужно знать, чтобы провести человека через подключение.
+ * Новый провайдер = адаптер + карточка; экраны борды при этом не меняются.
+ */
+export interface ProviderManifest {
+  title: string;
+  /** Одна строка: что это за провайдер. */
+  summary: string;
+  /** Способы оплаты для игрока. */
+  methods: string[];
+  links?: { dashboard?: string; docs?: string };
+  fields: CredentialField[];
+  capabilities: { refunds: boolean; partialRefunds: boolean; amountCheck: boolean };
+  webhook: {
+    scheme: WebhookScheme;
+    /** Какие события отметить в кабинете провайдера. */
+    events: string[];
+    /** Что сделать в кабинете провайдера, по шагам. */
+    steps: string[];
+    /** Что провайдер делает при сохранении адреса (например, проверяет его запросом) — чтобы не пугаться. */
+    note?: string;
+  };
 }
 
 export interface ConnectionCheck {
@@ -66,12 +104,8 @@ export interface ConnectionCheck {
 
 export interface ProviderAdapter {
   readonly name: string;
-  /** Название для людей: «Viva Wallet (Smart Checkout)». */
-  readonly title?: string;
-  /** Какие ключи вводить в борде. */
-  readonly credentialFields?: CredentialField[];
-  /** Как настроить вебхук у провайдера: поле токена в секрете, события, подсказка. */
-  readonly webhook?: { tokenField: string; events: string[]; help: string };
+  /** Карточка: название, ключи, как настроить вебхук, что умеет. */
+  readonly manifest: ProviderManifest;
   /** Проверка ключей без создания платежей: что работает, что нет и почему. */
   checkConnection?(creds: AccountCredentials): Promise<ConnectionCheck[]>;
   createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult>;

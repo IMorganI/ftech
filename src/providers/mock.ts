@@ -3,7 +3,7 @@ import { hmacHex, safeEqualHex } from '../crypto.js';
 import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
-  type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
+  type ProviderAdapter, type ProviderManifest, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
 } from './types.js';
 
 /*
@@ -109,8 +109,14 @@ export function signMockWebhook(secret: string, body: string, ts = Math.floor(Da
 
 export class MockAdapter implements ProviderAdapter {
   readonly name = 'mock';
-  readonly title = 'Тестовый провайдер (без реальных денег)';
-  readonly credentialFields = [];
+  readonly manifest: ProviderManifest = {
+    title: 'Тестовый провайдер (без реальных денег)',
+    summary: 'Симулятор внутри сервера: страница оплаты с кнопками «Оплатить» и «Отклонить».',
+    methods: ['Тестовая оплата'],
+    fields: [],
+    capabilities: { refunds: true, partialRefunds: true, amountCheck: true },
+    webhook: { scheme: 'internal', events: [], steps: [], note: 'Вебхуки идут внутри сервера, настраивать ничего не нужно.' },
+  };
 
   async checkConnection(): Promise<{ name: string; ok: boolean; message: string }[]> {
     return [{ name: 'Тестовый провайдер', ok: true, message: 'Ключи не нужны, оплата — на тестовой странице' }];

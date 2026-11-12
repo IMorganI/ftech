@@ -6,6 +6,7 @@ import { EnvSecretStore } from './secrets.js';
 import { ProviderRegistry } from './providers/types.js';
 import { MockAdapter, MockProvider } from './providers/mock.js';
 import { VivaAdapter } from './providers/viva.js';
+import { TestPayAdapter, TestPaySimulator } from './providers/testpay.js';
 import { dispatchOnce } from './webhooks/outbox.js';
 import { reconcilePending } from './payments/flow.js';
 import { resumePayouts } from './payouts/payouts.js';
@@ -23,9 +24,15 @@ if (config.MOCK_PROVIDER_ENABLED) {
   mock = new MockProvider({ publicBaseUrl: config.PUBLIC_BASE_URL, instantDeclineRate: 0.1, duplicateWebhookRate: 0.2 });
   providers.register(new MockAdapter(mock));
 }
+// Учебный провайдер с подписью вебхуков — для проверки сценария подключения «как у настоящих».
+let testpay: TestPaySimulator | undefined;
+if (config.MOCK_PROVIDER_ENABLED) {
+  testpay = new TestPaySimulator(config.PUBLIC_BASE_URL, '.data/testpay.json');
+  providers.register(new TestPayAdapter(testpay));
+}
 
 const app = buildApp({
-  pool, providers, secrets, mock, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
+  pool, providers, secrets, mock, testpay, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
   admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://'), webhookBaseUrl: config.WEBHOOK_BASE_URL ?? config.PUBLIC_BASE_URL },
   trustProxy: config.TRUST_PROXY,
 });
@@ -34,6 +41,15 @@ const app = buildApp({
 if (mock) {
   mock.sink = async (accountId, headers, body) => {
     await app.inject({ method: 'POST', url: `/v1/provider-webhooks/${accountId}`, headers, payload: body });
+  };
+}
+// TestPay доставляет вебхуки только на этот же сервер (внутренним запросом, без выхода в сеть):
+// из адреса берётся путь, хост не важен — так работает и с адресом Codespaces, и с туннелем.
+if (testpay) {
+  testpay.deliver = async (url, headers, body) => {
+    const u = new URL(url);
+    if (!u.pathname.startsWith('/v1/provider-webhooks/')) return 404;
+    return (await app.inject({ method: 'POST', url: u.pathname + u.search, headers, payload: body })).statusCode;
   };
 }
 
@@ -55,6 +71,8 @@ if (config.WORKERS_ENABLED) {
   }
   loop('payouts', 30_000, () => resumePayouts({ pool, providers, secrets, encryptionKey }));
   loop('reconcile', 20_000, () => reconcilePending({ pool, providers, secrets, encryptionKey }, config.RECONCILE_AFTER_SEC));
+  // Журнал входящих вебхуков нужен для разборов настройки — храним 30 дней.
+  loop('webhook-log', 3_600_000, () => pool.query(`DELETE FROM provider_webhook_log WHERE received_at < now() - interval '30 days'`));
 }
 
 const shutdown = async () => {

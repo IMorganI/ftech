@@ -280,7 +280,7 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     const real = new MockAdapter(mock);
     let failFor: string | null = accA;
     const flaky: ProviderAdapter = {
-      name: 'mock',
+      name: 'mock', manifest: real.manifest,
       createPayment: async (c, r) => { if (c.accountId === failFor) throw new Error('ETIMEDOUT'); return real.createPayment(c, r); },
       getStatus: (c, ref) => real.getStatus(c, ref),
       verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),

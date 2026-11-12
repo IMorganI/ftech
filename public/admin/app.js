@@ -882,62 +882,156 @@ function newConnectionForm(opId, o, connectors) {
 
 function accountConnection(a, connectors, open) {
   const body = h('div', { class: 'conn-body' });
-  const box = h('details', { class: 'conn', open: open || null, ontoggle: (e) => { if (e.target.open) { state.cache.openAcc = a.id; loadConnection(a, body); } } },
+  const box = h('details', { class: 'conn', open: open || null, ontoggle: (e) => {
+    if (e.target.open) { state.cache.openAcc = a.id; loadConnection(a, body); }
+    else if (state.cache.openAcc === a.id) state.cache.openAcc = null;
+  } },
     h('summary', null,
       h('b', null, a.name), ' ', h('span', { class: 'note' }, connectors.find((c) => c.name === a.provider_code)?.title || a.provider_code),
-      ' ', a.enabled ? null : h('span', { class: 'pill m' }, 'выключен')),
+      ' ', a.enabled ? h('span', { class: 'pill ok' }, 'включён') : h('span', { class: 'pill m' }, 'выключен')),
     body);
   if (open) loadConnection(a, body);
   return box;
 }
 
-async function loadConnection(a, body) {
-  put(body, h('p', { class: 'note' }, 'Загрузка…'));
-  let c;
-  try { c = await api('GET', `/admin/v1/accounts/${a.id}/connection`); }
-  catch (err) { if (!handleAuthError(err)) put(body, errorBox(err)); return; }
-  const checkOut = h('div');
-  const renderCheck = (r) => put(checkOut, r ? h('ul', { class: 'checks' }, r.results.map((x) =>
-    h('li', { class: x.ok ? 'ok' : 'bad' }, h('span', { 'aria-hidden': 'true' }, x.ok ? '✓' : '✕'), h('div', null, h('b', null, x.name), h('div', { class: 'note' }, x.message))))) : null);
-  if (c.lastCheck) renderCheck(c.lastCheck);
+const STEP_TITLES = { keys: 'Ключи', check: 'Проверка', webhook: 'Вебхук', live: 'Запуск' };
+const HOOK_OUTCOME = { accepted: ['принят', 'ok'], test: ['тест', 'ok'], duplicate: ['повтор', 'm'], challenge: ['проверка адреса', 'n'], rejected: ['отклонён', 'bad'], error: ['ошибка', 'bad'] };
 
-  const keysForm = c.fields.length ? actionForm({ class: 'form' }, [
-    ...c.fields.map((f) => {
+/** Форма полей одного шага (ключи или секрет вебхука). */
+function credentialForm(a, c, fields, submitLabel) {
+  return actionForm({ class: 'form' }, [
+    ...fields.map((f) => {
       const cur = c.values[f.key] || {};
       const input = f.options
         ? h('select', { name: f.key }, f.options.map((opt) => h('option', { value: opt, selected: (cur.value || f.default) === opt }, opt)))
         : h('input', { name: f.key, type: f.secret ? 'password' : 'text', autocomplete: 'off',
             value: f.secret ? '' : (cur.value || (c.source ? '' : f.default) || ''),
             placeholder: f.secret && cur.masked ? `${cur.masked} — оставь пустым, чтобы не менять` : (f.placeholder || '') });
-      return field(f.label + (f.required ? '' : ' (необязательно)'), [input, f.help ? h('span', { class: 'help' }, f.help) : null], f.key === 'clientId' ? 'wide' : null);
+      return field(f.label + (f.required || f.stage === 'webhook' ? '' : ' (необязательно)'), [input, f.help ? h('span', { class: 'help' }, f.help) : null], fields.length > 1 && f.key === 'clientId' ? 'wide' : 'full-sm');
     }),
-    h('div', { class: 'full row start' }, can('admin') ? h('button', { class: 'primary', type: 'submit' }, 'Сохранить ключи') : null),
+    h('div', { class: 'full row start' }, can('admin') ? h('button', { class: 'primary', type: 'submit' }, submitLabel) : h('span', { class: 'note' }, 'Ключи вводит администратор')),
   ], async (v) => {
     await api('PUT', `/admin/v1/accounts/${a.id}/credentials`, { values: v });
-    state.cache.openAcc = a.id; renderShell(); // обновить чек-лист готовности
+    state.cache.openAcc = a.id; renderShell();
     return null;
-  }) : h('p', { class: 'note' }, 'Ключи не нужны.');
+  });
+}
 
-  put(body, 
+async function loadConnection(a, body, quiet) {
+  if (!quiet) put(body, h('p', { class: 'note' }, 'Загрузка…'));
+  let c;
+  try { c = await api('GET', `/admin/v1/accounts/${a.id}/connection`); }
+  catch (err) { if (!handleAuthError(err)) put(body, errorBox(err)); return; }
+  const order = ['keys', 'check', 'webhook', 'live'];
+  const current = order.find((k) => !c.steps[k]) || null;
+  const stepBox = (key, n, ...content) => h('section', { class: `step ${c.steps[key] ? 'done' : ''} ${current === key ? 'current' : ''}` },
+    h('div', { class: 'step-head' }, h('span', { class: 'step-n', 'aria-hidden': 'true' }, c.steps[key] ? '✓' : String(n)),
+      h('h3', null, `${n}. ${STEP_TITLES[key]}`), c.steps[key] ? h('span', { class: 'pill ok' }, 'готово') : current === key ? h('span', { class: 'pill n' }, 'сейчас') : null),
+    h('div', { class: 'step-body' }, content));
+
+  // --- шапка: что это за провайдер ---
+  const caps = c.capabilities ? [['refunds', 'возвраты'], ['partialRefunds', 'частичные возвраты'], ['amountCheck', 'сверка суммы']]
+    .map(([k, label]) => h('span', { class: `tag ${c.capabilities[k] ? 'yes' : 'no'}` }, (c.capabilities[k] ? '✓ ' : '✕ ') + label)) : [];
+  const head = h('div', { class: 'prov-head' },
+    h('p', null, c.summary),
+    h('div', { class: 'tags' }, c.methods.map((m) => h('span', { class: 'tag' }, m)), caps),
+    h('div', { class: 'row start' },
+      c.links.dashboard ? h('a', { href: c.links.dashboard, target: '_blank', rel: 'noopener noreferrer' }, 'Кабинет провайдера ↗') : null,
+      c.links.docs ? h('a', { href: c.links.docs, target: '_blank', rel: 'noopener noreferrer' }, 'Документация ↗') : null),
+    h('ol', { class: 'progress', 'aria-label': 'Шаги подключения' }, order.map((k) =>
+      h('li', { class: `${c.steps[k] ? 'done' : ''} ${current === k ? 'current' : ''}` }, STEP_TITLES[k]))));
+
+  // --- 1. ключи ---
+  const keyFields = c.fields.filter((f) => f.stage !== 'webhook');
+  const s1 = stepBox('keys', 1,
     c.source === 'env' ? h('div', { class: 'msg warn' }, 'Сейчас ключи берутся из настроек сервера (.env). Если сохранишь их здесь — будут использоваться эти.') : null,
-    !c.source && c.fields.length ? h('div', { class: 'msg warn' }, 'Ключи ещё не введены — платежи через этот аккаунт не пройдут.') : null,
-    h('h3', null, '1. Ключи'), keysForm,
-    h('h3', null, '2. Проверка'),
-    h('div', { class: 'row start' }, h('button', { type: 'button', onclick: async (e) => {
+    keyFields.length ? [h('p', { class: 'note' }, 'Ключи хранятся в зашифрованном виде; после сохранения видны только последние 4 символа.'),
+      credentialForm(a, c, keyFields, 'Сохранить ключи')] : h('p', { class: 'note' }, 'Ключи не нужны.'));
+
+  // --- 2. проверка ---
+  const checkOut = h('div');
+  const renderCheck = (r) => put(checkOut, r ? h('ul', { class: 'checks' }, r.results.map((x) =>
+    h('li', { class: x.ok ? 'ok' : 'bad' }, h('span', { 'aria-hidden': 'true' }, x.ok ? '✓' : '✕'), h('div', null, h('b', null, x.name), h('div', { class: 'note' }, x.message))))) : null);
+  if (c.lastCheck) renderCheck(c.lastCheck);
+  const s2 = stepBox('check', 2,
+    h('div', { class: 'row start' }, h('button', { type: 'button', disabled: !c.steps.keys || null, onclick: async (e) => {
       e.target.disabled = true; e.target.textContent = 'Проверяю…';
       try { await api('POST', `/admin/v1/accounts/${a.id}/check`); state.cache.openAcc = a.id; renderShell(); return; }
       catch (err) { if (!handleAuthError(err)) put(checkOut, errorBox(err)); }
       finally { e.target.disabled = false; e.target.textContent = 'Проверить подключение'; }
     } }, 'Проверить подключение'),
-      c.lastCheck ? h('span', { class: 'note' }, `последняя проверка: ${when(c.lastCheck.at)}`) : h('span', { class: 'note' }, 'Проверяет ключи у провайдера, платежей не создаёт')),
-    checkOut,
-    c.webhook ? [
-      h('h3', null, '3. Вебхук у провайдера'),
-      h('p', { class: 'note' }, c.webhook.help),
-      copyBox(c.webhook.url, 'Копировать адрес'),
-      h('div', { class: 'note' }, 'События: ', c.webhook.events.join(', ')),
-      h('div', { class: 'note' }, c.webhook.lastReceivedAt ? `✓ Последний вебхук получен ${when(c.webhook.lastReceivedAt)}` : 'Вебхуков ещё не было. Без них статус оплаты обновится сверкой примерно через минуту.'),
-    ] : null);
+      h('span', { class: 'note' }, c.lastCheck ? `последняя проверка: ${when(c.lastCheck.at)}` : c.steps.keys ? 'Проверяет ключи у провайдера, платежей не создаёт' : 'Сначала введи ключи')),
+    checkOut);
+
+  // --- 3. вебхук ---
+  const w = c.webhook;
+  const secretField = w.secretField ? c.fields.find((f) => f.key === w.secretField) : null;
+  const status = {
+    internal: h('div', { class: 'msg ok' }, w.note || 'Настраивать ничего не нужно.'),
+    waiting: h('div', { class: 'hook-status waiting' }, h('span', { class: 'dot' }), h('div', null, h('b', null, 'Ждём первый вебхук'),
+      h('div', { class: 'note' }, 'Сделай шаги выше. Если у провайдера есть «Отправить тестовое событие» — нажми: статус здесь обновится сам.'))),
+    ok: h('div', { class: 'hook-status ok' }, h('span', { class: 'dot' }), h('div', null, h('b', null, 'Вебхуки приходят'),
+      h('div', { class: 'note' }, `последний принят ${when(w.lastOkAt)}`))),
+    failing: h('div', { class: 'hook-status bad' }, h('span', { class: 'dot' }), h('div', null, h('b', null, 'Вебхук приходит, но отклоняется'),
+      h('div', null, w.lastError?.reason || 'Причина неизвестна'), h('div', { class: 'note' }, when(w.lastError?.at)))),
+  }[w.state];
+  const logTable = w.log.length ? h('details', { class: 'hook-log' }, h('summary', null, `Журнал вебхуков (${w.log.length})`),
+    h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, h('th', null, 'Когда'), h('th', null, 'Итог'), h('th', null, 'Подробности'))),
+      h('tbody', null, w.log.map((r) => { const [label, cls] = HOOK_OUTCOME[r.outcome] || [r.outcome, 'm'];
+        return h('tr', null, h('td', { class: 'n dim' }, when(r.at)), h('td', null, h('span', { class: `pill ${cls}` }, label)),
+          h('td', null, r.reason || '', r.provider_ref ? h('div', { class: 'note' }, `платёж ${r.provider_ref}`) : null)); }))))) : null;
+  const s3 = stepBox('webhook', 3,
+    w.scheme === 'internal' ? status : [
+      h('p', { class: 'note' }, 'Вебхук — это когда провайдер сам сообщает нам об оплате за секунды. Без него статус обновится сверкой примерно через минуту.'),
+      h('div', { class: 'hook-url' }, h('span', { class: 'note' }, 'Адрес вебхука для этого аккаунта'), copyBox(w.url, 'Копировать адрес')),
+      w.steps.length ? h('ol', { class: 'steps' }, w.steps.map((t) => h('li', null, t))) : null,
+      w.events.length ? h('div', { class: 'row start' }, h('span', { class: 'note' }, 'События:'), h('div', { class: 'tags' }, w.events.map((e) => h('span', { class: 'tag' }, e)))) : null,
+      w.note ? h('p', { class: 'note' }, w.note) : null,
+      secretField ? h('div', { class: 'secret-step' },
+        h('b', null, secretField.label, w.secretSet ? h('span', { class: 'pill ok' }, ' введён') : h('span', { class: 'pill warn' }, ' нужен')),
+        credentialForm(a, c, [secretField], 'Сохранить секрет')) : null,
+      status, logTable,
+      can('admin') ? h('details', { class: 'danger-zone' }, h('summary', null, 'Адрес утёк или указан не туда?'),
+        h('p', { class: 'note' }, 'Можно выпустить новый адрес. Старый перестанет работать сразу — его придётся заменить в кабинете провайдера.'),
+        h('button', { class: 'sm danger', type: 'button', onclick: async () => {
+          await api('POST', `/admin/v1/accounts/${a.id}/webhook-token`); state.cache.openAcc = a.id; renderShell();
+        } }, 'Выпустить новый адрес')) : null,
+    ]);
+
+  // --- 4. запуск ---
+  const s4 = stepBox('live', 4,
+    h('div', { class: 'row start' },
+      c.enabled ? h('span', { class: 'pill ok' }, 'включён в маршрутизацию') : h('span', { class: 'pill m' }, 'выключен — платежи на него не идут'),
+      can('operator') ? h('button', { class: c.enabled ? 'sm' : 'primary', type: 'button', disabled: (!c.enabled && !c.steps.keys) || null, onclick: async (e) => {
+        e.target.disabled = true;
+        try { await api('PATCH', `/admin/v1/accounts/${a.id}`, { enabled: !c.enabled }); state.cache.openAcc = a.id; renderShell(); }
+        catch (err) { e.target.disabled = false; if (!handleAuthError(err)) e.target.after(errorBox(err)); }
+      } }, c.enabled ? 'Выключить' : 'Включить в маршрутизацию') : null),
+    !c.enabled && !c.steps.check ? h('p', { class: 'note' }, 'Совет: включай после зелёной проверки — иначе платежи будут отклоняться и уходить каскадом на другие аккаунты.') : null,
+    c.firstSuccessAt ? h('p', { class: 'note' }, `✓ Первый успешный депозит: ${when(c.firstSuccessAt)}`)
+      : h('div', { class: 'row start' }, h('span', { class: 'note' }, 'Осталось провести тестовый платёж.'),
+          h('button', { class: 'sm', type: 'button', disabled: !c.enabled || null, onclick: () => go('sandbox') }, 'Тест-платёж')));
+
+  // Не перерисовываем, пока человек что-то вводит.
+  if (quiet && body.contains(document.activeElement) && document.activeElement !== document.body) return;
+  put(body,
+    !c.adapterAvailable ? h('div', { class: 'msg err' }, `Интеграция «${c.adapter}» не подключена на сервере`) : null,
+    head, s1, s2, s3, s4,
+    c.ready ? h('div', { class: 'msg ok' }, 'Аккаунт подключён и принимает платежи.') : null);
+
+  // Пока ждём вебхук — тихо обновляем статус, чтобы зелёный загорелся сам.
+  if (w.state === 'waiting' || w.state === 'failing') {
+    const sig = `${w.state}|${w.log[0]?.at || ''}`;
+    setTimeout(async function poll() {
+      if (!body.isConnected || !body.closest('details')?.open) return;
+      try {
+        const n = await api('GET', `/admin/v1/accounts/${a.id}/connection`);
+        if (`${n.webhook.state}|${n.webhook.log[0]?.at || ''}` !== sig) return loadConnection(a, body, true);
+      } catch { return; }
+      setTimeout(poll, 4000);
+    }, 4000);
+  }
 }
 
 function sitesBlock(opId, mySites) {

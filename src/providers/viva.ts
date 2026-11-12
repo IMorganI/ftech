@@ -3,7 +3,7 @@ import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
   type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
-  type CredentialField, type ConnectionCheck,
+  type CredentialField, type ConnectionCheck, type ProviderManifest,
 } from './types.js';
 
 /*
@@ -32,7 +32,8 @@ export interface VivaCredentials {
   apiKey: string;
   sourceCode?: string;
   currency?: string;
-  webhookToken: string;
+  /** Старый формат: токен адреса вебхука лежал в ключах. Теперь он у аккаунта (webhook_token). */
+  webhookToken?: string;
 }
 
 const HOSTS = {
@@ -57,10 +58,10 @@ export class VivaError extends Error {
 export function parseVivaCredentials(secret: string): VivaCredentials {
   let c: Partial<VivaCredentials>;
   try { c = JSON.parse(secret); } catch { throw new Error('Секрет Viva должен быть JSON (см. docs/VIVA.md)'); }
-  const missing = (['clientId', 'clientSecret', 'merchantId', 'apiKey', 'webhookToken'] as const).filter((k) => !c[k]);
+  const missing = (['clientId', 'clientSecret', 'merchantId', 'apiKey'] as const).filter((k) => !c[k]);
   if (missing.length) throw new Error(`В секрете Viva не хватает: ${missing.join(', ')}`);
   if (c.env !== 'demo' && c.env !== 'live') throw new Error('В секрете Viva поле env должно быть "demo" или "live"');
-  if (c.webhookToken!.length < 24) throw new Error('webhookToken в секрете Viva — минимум 24 символа');
+  if (c.webhookToken !== undefined && c.webhookToken.length < 24) throw new Error('webhookToken в секрете Viva — минимум 24 символа');
   return c as VivaCredentials;
 }
 
@@ -106,12 +107,24 @@ const VIVA_FIELDS: CredentialField[] = [
 
 export class VivaAdapter implements ProviderAdapter {
   readonly name = 'viva';
-  readonly title = 'Viva Wallet (Smart Checkout)';
-  readonly credentialFields = VIVA_FIELDS;
-  readonly webhook = {
-    tokenField: 'webhookToken',
-    events: ['Transaction Payment Created', 'Transaction Failed'],
-    help: 'Кабинет Viva → Settings → API Access → Webhooks → Create Webhook: вставь адрес, выбери события, нажми Verify, затем убедись, что статус Active.',
+  readonly manifest: ProviderManifest = {
+    title: 'Viva Wallet (Smart Checkout)',
+    summary: 'Европейский эквайер: игрок платит на странице Viva, карты к нам не попадают.',
+    methods: ['Visa / Mastercard', 'Apple Pay', 'Google Pay'],
+    links: { dashboard: 'https://demo.vivapayments.com', docs: 'https://developer.viva.com/smart-checkout/' },
+    fields: VIVA_FIELDS,
+    capabilities: { refunds: true, partialRefunds: true, amountCheck: true },
+    webhook: {
+      scheme: 'token',
+      events: ['Transaction Payment Created', 'Transaction Failed'],
+      steps: [
+        'Открой кабинет Viva → Settings → API Access → Webhooks',
+        'Create Webhook: вставь адрес ниже',
+        'Отметь события Transaction Payment Created и Transaction Failed',
+        'Нажми Verify, сохрани и проверь, что статус Active',
+      ],
+      note: 'Viva не подписывает вебхуки: защищает токен в адресе, а статус платежа мы всё равно перепроверяем у Viva. При нажатии Verify Viva проверит адрес запросом — сервер ответит сам.',
+    },
   };
   private tokens = new Map<string, { token: string; expiresAt: number }>();
   private http: HttpFetch;
@@ -276,7 +289,7 @@ export class VivaAdapter implements ProviderAdapter {
   verifyWebhook(creds: AccountCredentials, _headers: Record<string, string | string[] | undefined>, rawBody: string,
     query: Record<string, unknown> = {}): VerifiedWebhook {
     const c = parseVivaCredentials(creds.secret);
-    this.checkToken(c, query);
+    if (c.webhookToken) this.checkToken(c, query); // старый формат ключей; основную проверку токена делает ядро
     const orderCode = extractNumber(rawBody, 'OrderCode');
     const messageId = /"MessageId"\s*:\s*"([^"]{1,100})"/i.exec(rawBody)?.[1];
     if (!orderCode || !messageId) throw new InvalidWebhookError('В вебхуке Viva нет OrderCode или MessageId');
@@ -287,7 +300,7 @@ export class VivaAdapter implements ProviderAdapter {
   /** GET-проверка адреса вебхука при настройке в кабинете Viva: отдаём их ключ. */
   async webhookChallenge(creds: AccountCredentials, query: Record<string, unknown> = {}): Promise<unknown> {
     const c = parseVivaCredentials(creds.secret);
-    this.checkToken(c, query);
+    if (c.webhookToken) this.checkToken(c, query);
     const res = await this.http(`${HOSTS[c.env].www}/api/messages/config/token`, {
       method: 'GET', headers: { authorization: basic(c.merchantId, c.apiKey) },
     });
@@ -299,7 +312,7 @@ export class VivaAdapter implements ProviderAdapter {
 
   private checkToken(c: VivaCredentials, query: Record<string, unknown>) {
     const got = Buffer.from(String(query.token ?? ''));
-    const want = Buffer.from(c.webhookToken);
+    const want = Buffer.from(c.webhookToken ?? '');
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new InvalidWebhookError('Неверный токен вебхука');
   }
 }
