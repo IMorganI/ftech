@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { isCurrency } from '../money/currencies.js';
 import { withTransaction, isUniqueViolation } from '../db/tx.js';
 import { generateApiKey } from '../auth.js';
 import { encrypt, randomSecret } from '../crypto.js';
@@ -18,7 +19,7 @@ import { completeManualLeg, approveManualLeg, ManualLegError } from '../payouts/
 const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER), z.string().regex(/^[1-9]\d{0,17}$/)])
   .transform((v) => BigInt(v));
 const uuid = z.string().uuid();
-const currency = z.string().regex(/^[A-Z]{3}$/);
+const currency = z.string().regex(/^[A-Z]{3}$/).refine(isCurrency, 'Неизвестный код валюты ISO 4217');
 const country = z.string().regex(/^[A-Z]{2}$/);
 const httpsUrl = z.string().url().max(2000).refine((u) => u.startsWith('https://') || u.startsWith('http://localhost'), 'Только https://');
 

@@ -25,6 +25,8 @@ export interface AppDeps {
   logLevel?: string;
   /** Запросов в минуту на один API-ключ (или IP без ключа). */
   rateLimitPerMinute?: number;
+  /** Частота запросов на адрес вебхуков провайдеров с одного IP, в минуту (по умолчанию 600). */
+  webhookRateLimitPerMinute?: number;
   /** Админка: ключ шифрования секретов и флаг HTTPS-cookie. */
   admin?: { encryptionKey: Buffer; secureCookies: boolean; loginRateLimitPerMinute?: number; webhookBaseUrl?: string };
   trustProxy?: boolean;
@@ -81,7 +83,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     });
 
     // Вебхуки провайдеров: без ключа сайта, защищены подписью провайдера.
-    app.register(providerWebhookRoutes, payment);
+    app.register(providerWebhookRoutes, { ...payment, webhookRateLimitPerMinute: deps.webhookRateLimitPerMinute });
 
     if (deps.mock) app.register(mockProviderRoutes, { mock: deps.mock });
     if (deps.testpay) app.register(testPayRoutes, { sim: deps.testpay });

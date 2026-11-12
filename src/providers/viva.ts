@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import {
-  InvalidWebhookError,
+  InvalidWebhookError, NotSentError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
   type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
   type CredentialField, type ConnectionCheck, type ProviderManifest, type ProviderPayment,
@@ -222,7 +222,11 @@ export class VivaAdapter implements ProviderAdapter {
     if (req.currency !== currency) return { kind: 'declined', reason: `currency_not_supported:${req.currency}` };
     if (req.amount > BigInt(Number.MAX_SAFE_INTEGER)) return { kind: 'declined', reason: 'amount_too_large' };
 
-    const token = await this.token(c);
+    let token: string;
+    try { token = await this.token(c); } catch (err) {
+      // Токен не получен — заказ ещё не отправляли: можно идти на другой аккаунт.
+      throw new NotSentError(`Viva: не удалось получить токен (${(err as Error).message})`);
+    }
     const body: Record<string, unknown> = {
       amount: Number(req.amount),            // в минорных единицах (центах), как и у нас
       customerTrns: 'Пополнение счёта',
@@ -238,11 +242,12 @@ export class VivaAdapter implements ProviderAdapter {
     });
     const text = await res.text();
     if (res.status === 401) this.tokens.delete(`${c.env}:${c.clientId}`);
-    // 4xx — Viva явно отказала (неверные данные, источник не настроен): это отказ, каскад пойдёт дальше.
-    if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 429) {
+    // 4xx — Viva явно отказала (неверные данные, источник не настроен, авторизация 401, лимит частоты 429):
+    // заказ не создан, это отказ — каскад пойдёт дальше.
+    if (res.status >= 400 && res.status < 500) {
       return { kind: 'declined', reason: `viva_http_${res.status}: ${vivaErrorText(res.status, text)}` };
     }
-    // 5xx, 401, 429, сеть — не знаем, создан ли заказ: исключение, попытку разберёт сверка.
+    // 5xx, сеть — не знаем, создан ли заказ: исключение, попытку разберёт сверка.
     if (!res.ok) throw new VivaError(`Viva create order: HTTP ${res.status}`, res.status);
     const orderCode = extractNumber(text, 'orderCode');
     if (!orderCode) throw new VivaError('Viva create order: в ответе нет orderCode');
@@ -304,7 +309,10 @@ export class VivaAdapter implements ProviderAdapter {
     if (!/^\d{6,20}$/.test(req.providerRef)) return { kind: 'declined', reason: 'неверный код заказа' };
     const auth = { authorization: basic(c.merchantId, c.apiKey) };
 
-    const charge = await this.charge(c, req.providerRef);
+    let charge;
+    try { charge = await this.charge(c, req.providerRef); } catch (err) {
+      throw new NotSentError(`Viva: не удалось найти оплату для возврата (${(err as Error).message})`); // возврат не отправлялся
+    }
     if (!charge) return { kind: 'declined', reason: 'у заказа нет успешной оплаты для возврата' };
 
     const qs = new URLSearchParams({ amount: req.amount.toString() });
@@ -313,7 +321,9 @@ export class VivaAdapter implements ProviderAdapter {
     const text = await res.text();
     let body: { Success?: boolean; StatusId?: string; TransactionId?: string; ErrorText?: string | null; ErrorCode?: number } = {};
     try { body = JSON.parse(text); } catch { /* пусто или не JSON */ }
-    if (res.status >= 500 || res.status === 429 || res.status === 401) throw new VivaError(`Viva refund: HTTP ${res.status}`, res.status);
+    // 401/429 — Viva не выполняла запрос: возврат точно не прошёл, его можно повторить позже.
+    if (res.status === 429 || res.status === 401) throw new NotSentError(`Viva refund: HTTP ${res.status}`);
+    if (res.status >= 500) throw new VivaError(`Viva refund: HTTP ${res.status}`, res.status);
     // Успех — только явный: Success = true и ErrorCode = 0 (HTTP 200 бывает и при отказе).
     if (res.ok && body.Success === true && (body.ErrorCode ?? 0) === 0) return { kind: 'success', refundRef: body.TransactionId };
     const known: Record<string, string> = {

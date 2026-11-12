@@ -202,7 +202,7 @@ export class TestPayAdapter implements ProviderAdapter {
 
   async createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult> {
     const c = parseCreds(creds.secret);
-    if (!this.sim.keys.has(c.apiKey)) throw new Error('TestPay: 401 неверный API-ключ');
+    if (!this.sim.keys.has(c.apiKey)) return { kind: 'declined', reason: 'testpay_http_401: неверный API-ключ' }; // заказ не создан
     const p = this.sim.create(c.apiKey, req);
     return { kind: 'redirect', providerRef: p.id, redirectUrl: `${this.sim.publicBaseUrl}/testpay/pay/${p.id}` };
   }

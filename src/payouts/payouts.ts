@@ -5,6 +5,7 @@ import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
 import type { PaymentDeps } from '../payments/flow.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
 import { accountCredentials } from '../providers/credentials.js';
+import { NotSentError } from '../providers/types.js';
 import { getTransactionById, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
 import { audit } from '../admin/auth.js';
 
@@ -144,17 +145,18 @@ async function insertPayout(c: Client, req: PayoutRequest, h: string): Promise<s
 
 /** Исполнить ожидающие возвраты выплаты у провайдеров и подвести итог. */
 export async function executePayout(d: PaymentDeps, payoutId: string): Promise<TransactionView> {
+  const notSent: string[] = [];
   for (;;) {
     // Захват части: отправить возврат может только один процесс.
     const leg = (await d.pool.query(
       `UPDATE payout_legs l SET submitted_at = now()
        FROM transactions dep, transaction_attempts a, merchant_accounts m, providers p
        WHERE l.id = (SELECT id FROM payout_legs WHERE payout_id = $1 AND kind = 'refund' AND status = 'pending'
-                     AND submitted_at IS NULL ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+                     AND submitted_at IS NULL AND NOT (id = ANY($2::uuid[])) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
          AND dep.id = l.deposit_id AND a.transaction_id = dep.id AND a.status = 'success'
          AND m.id = l.merchant_account_id AND p.id = m.provider_id
        RETURNING l.id, l.amount, l.deposit_id, a.provider_ref, dep.currency, m.id AS account_id, m.credentials_ref, p.adapter`,
-      [payoutId])).rows[0];
+      [payoutId, notSent])).rows[0];
     if (!leg) break;
 
     const adapter = (() => { try { return d.providers.get(leg.adapter); } catch { return null; } })();
@@ -164,9 +166,16 @@ export async function executePayout(d: PaymentDeps, payoutId: string): Promise<T
     }
     let result;
     try {
-      result = await adapter.refund(await accountCredentials(d, leg.account_id),
-        { providerRef: leg.provider_ref, amount: leg.amount, currency: leg.currency.trim(), reference: leg.id });
+      const creds = await accountCredentials(d, leg.account_id).catch((e: Error) => { throw new NotSentError(`нет ключей аккаунта: ${e.message}`); });
+      result = await adapter.refund(creds, { providerRef: leg.provider_ref, amount: leg.amount, currency: leg.currency.trim(), reference: leg.id });
     } catch (err) {
+      if (err instanceof NotSentError) {
+        // Возврат не отправлялся: вернём часть в очередь, фоновая задача повторит. Видно в «Зависших деньгах».
+        await d.pool.query(`UPDATE payout_legs SET submitted_at = NULL, error = $2 WHERE id = $1`,
+          [leg.id, `not_sent: ${err.message}`.slice(0, 500)]);
+        notSent.push(leg.id);
+        continue;
+      }
       // Неизвестно, прошёл ли возврат: не повторяем автоматически, отдаём человеку.
       const msg = `refund_error: ${(err as Error).message}`.slice(0, 500);
       await d.pool.query(`UPDATE payout_legs SET error = $2 WHERE id = $1`, [leg.id, msg]);

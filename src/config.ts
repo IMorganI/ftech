@@ -28,5 +28,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
     throw new Error(`Ошибка конфигурации: ${issues}`);
   }
+  // Учебные провайдеры (мок, TestPay) позволяют «оплатить» без денег — на боевом сервере их быть не должно.
+  if (parsed.data.MOCK_PROVIDER_ENABLED && env.NODE_ENV === 'production') {
+    throw new Error('MOCK_PROVIDER_ENABLED=true запрещён при NODE_ENV=production: тестовые провайдеры принимают «оплату» без денег');
+  }
   return parsed.data;
 }

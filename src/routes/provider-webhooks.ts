@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { z } from 'zod';
 import { InvalidWebhookError } from '../providers/types.js';
 import { handleProviderWebhook, providerWebhookChallenge, type PaymentDeps } from '../payments/flow.js';
@@ -7,7 +8,13 @@ import { handleProviderWebhook, providerWebhookChallenge, type PaymentDeps } fro
  * Приём вебхуков от провайдеров: POST /v1/provider-webhooks/:accountId
  * Тело читаем как сырую строку — подпись считается именно от неё, байт в байт.
  */
-export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentDeps) {
+export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentDeps & { webhookRateLimitPerMinute?: number }) {
+  // Адрес открыт без ключа (защищён токеном и подписью) — ограничиваем частоту, чтобы мусорными запросами
+  // нельзя было нагружать базу и раздувать журнал вебхуков. Провайдеры шлют намного реже.
+  await app.register(rateLimit, {
+    max: deps.webhookRateLimitPerMinute ?? 600, timeWindow: '1 minute', keyGenerator: (req) => req.ip,
+    errorResponseBuilder: () => ({ statusCode: 429, error: { code: 'rate_limited', message: 'Слишком много запросов' } }),
+  });
   app.addContentTypeParser('application/json', { parseAs: 'string', bodyLimit: 64 * 1024 },
     (_req, body, done) => done(null, body));
 
