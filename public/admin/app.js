@@ -178,6 +178,7 @@ function showChangePassword() {
 const MENU = [
   ['Деньги', [
     ['overview', 'Обзор', 'viewer', 'Депозиты, оборот и заработок платформы за период'],
+    ['analytics', 'Аналитика', 'viewer', 'Цифры по операторам, сайтам, аккаунтам и провайдерам; выгрузка в CSV'],
     ['payments', 'Платежи', 'viewer', 'Все депозиты и выплаты: поиск, статусы, попытки по аккаунтам'],
     ['manual', 'Ручные выплаты', 'viewer', 'Остатки выплат, которые не удалось вернуть на карту'],
   ]],
@@ -268,6 +269,147 @@ function renderShell() {
   if (['overview', 'payments', 'manual', 'accounts', 'issues'].includes(state.tab)) {
     state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
   }
+}
+
+// ---------- аналитика ----------
+
+const GROUPS = [['operator', 'Операторы'], ['site', 'Сайты'], ['account', 'Аккаунты'], ['provider', 'Провайдеры']];
+const A_PERIODS = [['today', 'Сегодня'], ['7d', '7 дней'], ['30d', '30 дней'], ['custom', 'Свой период']];
+const isoDay = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+const ruDay = (d) => `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)}`;
+
+function analyticsQuery(f) {
+  const p = new URLSearchParams({ period: f.period, groupBy: f.groupBy, tz: TZ });
+  if (f.period === 'custom') { p.set('from', f.from); p.set('to', f.to); }
+  if (f.operatorId) p.set('operatorId', f.operatorId);
+  return p.toString();
+}
+
+/** Скачивание через fetch: ошибки (слишком длинный период и т. п.) показываем в борде, а не открываем JSON. */
+async function download(path, btn, box) {
+  btn.disabled = true; put(box);
+  try {
+    const res = await fetch(path, { credentials: 'same-origin' });
+    if (!res.ok) {
+      let msg = `Ошибка ${res.status}`;
+      try { msg = (await res.json()).error.message; } catch { /* не JSON */ }
+      throw Object.assign(new Error(msg), { status: res.status });
+    }
+    const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || 'ftech.csv';
+    const url = URL.createObjectURL(await res.blob());
+    const a = h('a', { href: url, download: name }); document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (err) {
+    if (!handleAuthError(err)) put(box, errorBox(err));
+  } finally { btn.disabled = false; }
+}
+
+async function viewAnalytics(main) {
+  const today = isoDay(new Date());
+  const f = state.cache.analytics ||= { period: '30d', groupBy: 'operator', operatorId: '', from: isoDay(new Date(Date.now() - 29 * 86400e3)), to: today };
+  const operators = await api('GET', '/admin/v1/operators');
+  let data, loadError = null;
+  try { data = await api('GET', `/admin/v1/analytics?${analyticsQuery(f)}`); }
+  catch (err) {
+    if (err.status === 401 || err.status === 403) throw err;
+    // Фильтры остаются на экране — ошибку можно исправить, не уходя со страницы.
+    loadError = err; data = { rows: [], totals: [], fromDay: f.from, toDay: f.to, tz: TZ };
+  }
+  const set = (patch) => { Object.assign(f, patch); renderShell(); };
+  const forAccounts = f.groupBy === 'account' || f.groupBy === 'provider';
+  const [colName, colExtra] = { operator: ['Оператор', null], site: ['Сайт', 'Оператор'], account: ['Аккаунт', 'Провайдер'], provider: ['Провайдер', null] }[f.groupBy];
+
+  const seg = (items, cur, onPick, label) => h('div', { class: 'seg', role: 'group', 'aria-label': label },
+    items.map(([id, name]) => h('button', { class: id === cur ? 'on' : '', 'aria-pressed': id === cur, onclick: () => onPick(id) }, name)));
+
+  const fromIn = h('input', { type: 'date', value: f.from, max: today, 'aria-label': 'С' });
+  const toIn = h('input', { type: 'date', value: f.to, max: today, 'aria-label': 'По' });
+  const custom = f.period === 'custom' ? h('div', { class: 'dates' },
+    h('label', null, 'С', fromIn), h('label', null, 'По', toIn),
+    h('button', { class: 'primary', onclick: () => {
+      const a = fromIn.value, b = toIn.value;
+      const days = (Date.parse(b) - Date.parse(a)) / 86400e3 + 1;
+      if (!a || !b || days < 1) return put(dlBox, h('div', { class: 'msg err' }, 'Дата «по» должна быть не раньше даты «с»'));
+      if (days > 366) return put(dlBox, h('div', { class: 'msg err' }, 'Период не больше 366 дней'));
+      set({ from: a, to: b });
+    } }, 'Показать')) : null;
+
+  const opSel = h('select', { 'aria-label': 'Оператор', onchange: (e) => set({ operatorId: e.target.value }) },
+    h('option', { value: '' }, 'Все операторы'),
+    operators.map((o) => { const opt = h('option', { value: o.id }, o.name); if (o.id === f.operatorId) opt.selected = true; return opt; }));
+
+  const dlBox = h('div');
+  const dlSummary = h('button', { onclick: () => download(`/admin/v1/analytics.csv?${analyticsQuery(f)}`, dlSummary, dlBox) }, '⇩ Таблица в CSV');
+  const dlTx = can('operator') ? h('button', { onclick: () => download(`/admin/v1/export/transactions.csv?${analyticsQuery(f)}`, dlTx, dlBox) }, '⇩ Все платежи в CSV') : null;
+
+  const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
+  const share = (v, total) => (BigInt(total) > 0n ? Number((BigInt(v) * 1000n) / BigInt(total)) / 10 : 0);
+  const totalBy = Object.fromEntries(data.totals.map((t) => [t.currency, t]));
+  const meter = (value, cls) => value === null ? h('span', { class: 'dim' }, '—')
+    : h('div', { class: 'cell-meter' }, h('span', null, `${value}%`),
+        h('div', { class: `meter ${cls || ''}` }, h('i', { style: `width:${Math.min(100, value)}%` })));
+
+  const line = (r, total) => {
+    const conv = pct(r.succeeded, r.succeeded + r.declined);
+    return h('tr', { class: total ? 'total' : '' },
+      h('td', null, h('div', { class: 'name' }, r.label), colExtra && r.extra ? h('div', { class: 'note' }, r.extra) : null),
+      h('td', { class: 'n' }, h('b', null, r.succeeded), h('span', { class: 'dim' }, ` / ${r.deposits}`)),
+      h('td', null, meter(conv, conv !== null && conv < 50 ? 'low' : '')),
+      h('td', null, meter(pct(r.attemptsOk, r.attempts), 'alt')),
+      h('td', { class: 'n' }, money(r.volume, r.currency),
+        total ? null : h('div', { class: 'meter share', title: `${share(r.volume, totalBy[r.currency]?.volume ?? 0)}% оборота` },
+          h('i', { style: `width:${share(r.volume, totalBy[r.currency]?.volume ?? 0)}%` }))),
+      h('td', { class: 'n' }, r.succeeded ? money(String(BigInt(r.volume) / BigInt(r.succeeded)), r.currency) : '—'),
+      h('td', { class: 'n money' }, money(r.earned, r.currency)),
+      h('td', { class: 'n dim' }, money(r.providerCost, r.currency)),
+      h('td', { class: 'n' }, BigInt(r.paidOut) ? money(r.paidOut, r.currency) : h('span', { class: 'dim' }, '—'),
+        r.payouts ? h('div', { class: 'note' }, `${r.payouts} ${forAccounts ? plural(r.payouts, 'возврат', 'возврата', 'возвратов') : plural(r.payouts, 'выплата', 'выплаты', 'выплат')}`) : null));
+  };
+
+  const t = data.totals;
+  const kpi = (label, value, sub) => h('div', { class: 'kpi' }, h('span', { class: 'kpi-label' }, label),
+    h('b', { class: 'kpi-value' }, ...(value.length ? value.map((v) => h('span', null, v)) : ['0'])), sub ? h('span', { class: 'kpi-sub' }, sub) : null);
+  const sumN = (k) => t.reduce((a, r) => a + r[k], 0);
+  const totalConv = pct(sumN('succeeded'), sumN('succeeded') + sumN('declined'));
+
+  put(main,
+    h('section', { class: 'panel filters' },
+      h('div', { class: 'filter-row' }, h('span', { class: 'flabel' }, 'Период'), seg(A_PERIODS, f.period, (id) => set({ period: id }), 'Период'), custom),
+      h('div', { class: 'filter-row' }, h('span', { class: 'flabel' }, 'Разбить по'), seg(GROUPS, f.groupBy, (id) => set({ groupBy: id }), 'Группировка'),
+        operators.length > 1 ? opSel : null),
+      h('div', { class: 'row' },
+        h('span', { class: 'note' }, `${ruDay(data.fromDay)} — ${ruDay(data.toDay)} · время ${data.tz}`),
+        h('div', { class: 'row start' }, dlSummary, dlTx)),
+      dlBox, loadError ? errorBox(loadError) : null),
+
+    t.length ? h('div', { class: 'kpis' },
+      kpi('Оборот', t.map((r) => money(r.volume, r.currency)), `${sumN('succeeded')} ${plural(sumN('succeeded'), 'успешный депозит', 'успешных депозита', 'успешных депозитов')}`),
+      kpi('Конверсия', [totalConv === null ? '—' : `${totalConv}%`], `${sumN('declined')} ${plural(sumN('declined'), 'отказ', 'отказа', 'отказов')}`),
+      kpi('Заработала платформа', t.map((r) => money(r.earned, r.currency)), 'комиссия с успешных депозитов'),
+      kpi('Выплачено игрокам', t.map((r) => money(r.paidOut, r.currency)).filter((_, i) => BigInt(t[i].paidOut)), forAccounts ? 'возвраты на карты через аккаунты' : `${sumN('payouts')} ${plural(sumN('payouts'), 'выплата', 'выплаты', 'выплат')}`)) : null,
+
+    h('section', { class: 'panel' },
+      h('div', { class: 'row' }, h('h2', null, `По ${{ operator: 'операторам', site: 'сайтам', account: 'аккаунтам', provider: 'провайдерам' }[f.groupBy]}`)),
+      data.rows.length === 0
+        ? h('p', { class: 'note' }, 'За этот период платежей нет. Выбери период длиннее или проведи тест-платёж.')
+        : h('div', { class: 'tbl' }, h('table', { class: 'analytics' },
+            h('thead', null, h('tr', null,
+              h('th', null, colName), h('th', null, 'Депозиты', h('div', { class: 'th-sub' }, 'успешно / всего')),
+              h('th', null, 'Конверсия'), h('th', null, 'Одобрение', h('div', { class: 'th-sub' }, 'попыток')),
+              h('th', null, 'Оборот', h('div', { class: 'th-sub' }, 'доля в валюте')), h('th', null, 'Средний чек'),
+              h('th', null, 'Заработали'), h('th', null, 'Провайдеру'),
+              h('th', null, forAccounts ? 'Возвраты на карты' : 'Выплачено'))),
+            h('tbody', null, data.rows.map((r) => line(r, false))),
+            h('tfoot', null, data.totals.map((r) => line(r, true))))),
+      h('details', { class: 'explain' }, h('summary', null, 'Что значат колонки'),
+        h('ul', { class: 'plain note' },
+          h('li', null, 'Конверсия — доля успешных среди завершённых депозитов (без тех, что ещё ждут оплаты).'),
+          h('li', null, 'Одобрение попыток — доля успешных попыток. Если платёж каскадом прошёл со второго аккаунта, у первого это отказ. ',
+            forAccounts ? 'Здесь попытка засчитывается тому аккаунту, через который она шла.' : ''),
+          h('li', null, 'Заработали — комиссия платформы с успешных депозитов. Провайдеру — его комиссия по ставке аккаунта.'),
+          h('li', null, forAccounts ? 'Возвраты на карты — выплаты игрокам, проведённые возвратом через этот аккаунт.' : 'Выплачено — успешные выплаты игрокам (возвраты на карты и ручные).'),
+          h('li', null, 'Разные валюты не складываются: итог — отдельно по каждой валюте.'),
+          h('li', null, 'CSV открывается в Excel и Google Таблицах: разделитель «;», копейки через запятую. Выгрузка всех платежей содержит ID игроков, доступна с роли «оператор» и записывается в журнал.')))));
 }
 
 // ---------- обзор: деньги и депозиты ----------
@@ -907,7 +1049,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, analytics: viewAnalytics, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);
