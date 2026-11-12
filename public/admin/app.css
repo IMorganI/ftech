@@ -305,3 +305,12 @@ li.tl.bad .tl-title { color: var(--bad); }
 
 .grid2.pay { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
 @media (max-width: 1100px) { .grid2.pay { grid-template-columns: minmax(0, 1fr); } }
+
+.cb-form summary { font-size: 13px; color: var(--accent); }
+.cb-form { border: 1px dashed var(--line); border-radius: 8px; padding: 8px 10px; }
+.grid2.rc { grid-template-columns: minmax(0, 1fr); }
+.grid2.rc .rc-list .tbl { max-height: 240px; overflow-y: auto; }
+table td .note { max-width: 46ch; }
+
+/* дочерние элементы панели не растягивают её шире экрана (широкие таблицы прокручиваются внутри .tbl) */
+.panel > * { min-width: 0; }

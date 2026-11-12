@@ -12,12 +12,13 @@ import type { TransactionView } from '../routing/router.js';
  */
 
 export type SiteEvent = 'deposit.succeeded' | 'deposit.declined' | 'deposit.payment_url_changed'
-  | 'payout.succeeded' | 'payout.declined' | 'payout.requires_manual';
+  | 'payout.succeeded' | 'payout.declined' | 'payout.requires_manual'
+  | 'deposit.chargeback_opened' | 'deposit.chargeback_won' | 'deposit.chargeback_lost';
 
 export const SIGNATURE_HEADER = 'ftech-signature';
 export const MAX_DELIVERY_ATTEMPTS = 12;
 
-export async function enqueueSiteEvent(c: Client, tx: TransactionView, event: SiteEvent): Promise<void> {
+export async function enqueueSiteEvent(c: Client, tx: TransactionView, event: SiteEvent, extra?: Record<string, unknown>): Promise<void> {
   // Вебхук ставится в очередь, только если у сайта настроен адрес.
   await c.query(
     `INSERT INTO webhook_deliveries (site_id, transaction_id, event, payload)
@@ -26,7 +27,7 @@ export async function enqueueSiteEvent(c: Client, tx: TransactionView, event: Si
     [tx.siteId, tx.id, event, JSON.stringify({
       id: tx.id, type: tx.type, status: tx.status, amount: tx.amount.toString(), currency: tx.currency,
       declineCode: tx.declineCode, paymentUrl: tx.status === 'pending' ? tx.paymentUrl : null,
-      updatedAt: tx.updatedAt.toISOString(),
+      updatedAt: tx.updatedAt.toISOString(), ...(extra ?? {}),
     })],
   );
 }

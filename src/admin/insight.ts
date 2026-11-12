@@ -126,6 +126,23 @@ export async function paymentTimeline(pool: Pool, txId: string) {
     else push({ at: w.created_at, kind: 'site_webhook', tone: 'info', title: `Уведомление сайту ${w.event} в очереди`, detail: w.attempts ? `попыток: ${w.attempts}, ошибка: ${w.last_error ?? '—'}` : null });
   }
 
+  // --- чарджбэки ---
+  const CB: Record<string, [Tone, string]> = {
+    open: ['bad', 'Чарджбэк: игрок оспорил оплату'], evidence_submitted: ['info', 'Чарджбэк: доказательства отправлены провайдеру'],
+    won: ['ok', 'Чарджбэк выигран — деньги возвращены'], lost: ['bad', 'Чарджбэк проигран'], accepted: ['warn', 'Чарджбэк принят без спора'],
+  };
+  const chargebacks = (await pool.query(
+    `SELECT cb.id, cb.amount, cb.fee, cb.status, cb.respond_by, cb.case_ref, cb.reason_code, e.status AS ev, e.note, e.created_at, u.email
+     FROM chargebacks cb JOIN chargeback_events e ON e.chargeback_id = cb.id LEFT JOIN admin_users u ON u.id = e.admin_user_id
+     WHERE cb.transaction_id = $1 ORDER BY e.id`, [txId])).rows;
+  for (const c of chargebacks) {
+    const [tone, title] = CB[c.ev] ?? ['info', c.ev];
+    push({ at: c.created_at, kind: 'chargeback', tone, title, actor: c.email,
+      detail: [c.ev === 'open' ? `${fmt(c.amount, cur)}${BigInt(c.fee) ? ` + комиссия ${fmt(c.fee, cur)}` : ''}` : null,
+        c.ev === 'open' && c.reason_code ? `код ${c.reason_code}` : null, c.ev === 'open' && c.case_ref ? `спор ${c.case_ref}` : null,
+        c.ev === 'open' && c.respond_by ? `ответить до ${new Date(c.respond_by).toLocaleDateString('ru-RU')}` : null, c.note].filter(Boolean).join(' · ') || null });
+  }
+
   // --- проблемы и действия сотрудников ---
   const issues = (await pool.query(
     `SELECT i.*, u.email AS resolved_email FROM reconciliation_issues i LEFT JOIN admin_users u ON u.id = i.resolved_by WHERE i.transaction_id = $1 ORDER BY i.id`, [txId])).rows;
@@ -143,10 +160,15 @@ export async function paymentTimeline(pool: Pool, txId: string) {
 
   ev.sort((x, y) => +x.at - +y.at || x.seq - y.seq);
   const { state, next } = assess(tx, attempts, legs, issues, deliveries);
+  const openCb = [...new Map(chargebacks.map((c) => [c.id, c])).values()].filter((c) => c.status === 'open' || c.status === 'evidence_submitted');
+  if (openCb.length) {
+    next.unshift({ who: 'staff', tab: 'chargebacks', text: `Открыт чарджбэк${openCb[0].respond_by ? ` — ответить провайдеру до ${new Date(openCb[0].respond_by).toLocaleDateString('ru-RU')}` : ''}: собери доказательства (вход игрока, история игр, KYC) и отправь провайдеру` });
+    if (state.tone === 'ok') Object.assign(state, { tone: 'bad', title: 'Оспорен (чарджбэк)', detail: 'Сумма списана эквайером до решения спора; вернуть её игроку выплатой нельзя' });
+  }
   return plain({
     id: tx.id, type: tx.type, status: tx.status, amount: tx.amount, currency: cur, declineCode: tx.decline_code,
     site: tx.site, operator: tx.operator, player: tx.player, country: tx.country.trim(), withdrawalId: tx.withdrawal_id,
-    createdAt: tx.created_at, platformFee: tx.platform_fee, providerFee: tx.provider_fee, refunded: tx.refunded_amount,
+    createdAt: tx.created_at, platformFee: tx.platform_fee, providerFee: tx.provider_fee, refunded: tx.refunded_amount, chargedBack: tx.charged_back_amount,
     state, next, events: ev.map(({ seq: _seq, ...e }) => e),
   });
 }
@@ -244,6 +266,27 @@ export async function stuckMoney(pool: Pool): Promise<{ categories: StuckCategor
     hint: 'Расхождения с провайдером, которые решает человек.' },
     `SELECT t.id AS tx_id, t.amount, t.currency, i.created_at AS at, i.kind || ': ' || left(i.details, 120) AS label
      FROM reconciliation_issues i JOIN transactions t ON t.id = i.transaction_id WHERE NOT i.resolved`);
+
+  await add({ key: 'chargeback_deadline', severity: 'bad', tab: 'chargebacks', title: 'Чарджбэки: срок ответа ≤ 3 дней',
+    hint: 'Не ответишь провайдеру в срок — спор проигран автоматически. Отправь доказательства и отметь в «Чарджбэках».' },
+    `SELECT t.id AS tx_id, cb.amount, cb.currency, cb.opened_at AS at,
+       'ответить до ' || to_char(cb.respond_by, 'DD.MM') || coalesce(' · код ' || cb.reason_code, '') AS label
+     FROM chargebacks cb JOIN transactions t ON t.id = cb.transaction_id
+     WHERE cb.status = 'open' AND cb.respond_by IS NOT NULL AND cb.respond_by <= (now() AT TIME ZONE 'UTC')::date + 3`);
+
+  await add({ key: 'report_discrepancies', severity: 'bad', tab: 'reconciliation', title: 'Расхождения с выпиской провайдера',
+    hint: 'Провайдер и мы видим деньги по-разному. Разбери в «Сверке» и отметь, что сделано.' },
+    `SELECT l.transaction_id AS tx_id, coalesce(l.amount, 0) AS amount,
+       coalesce(l.currency, 'EUR') AS currency, coalesce(l.occurred_at, r.uploaded_at) AS at, l.details AS label
+     FROM report_lines l JOIN report_imports r ON r.id = l.import_id WHERE l.severity = 'bad' AND NOT l.resolved`);
+
+  await add({ key: 'chargebacks_open', severity: 'warn', tab: 'chargebacks', title: 'Открытые чарджбэки',
+    hint: 'Спор идёт: сумма списана эквайером до решения. Следи за ответом провайдера.' },
+    `SELECT t.id AS tx_id, cb.amount, cb.currency, cb.opened_at AS at,
+       CASE cb.status WHEN 'evidence_submitted' THEN 'доказательства отправлены' ELSE 'ждёт ответа' END || coalesce(' · код ' || cb.reason_code, '') AS label
+     FROM chargebacks cb JOIN transactions t ON t.id = cb.transaction_id
+     WHERE cb.status IN ('open', 'evidence_submitted')
+       AND NOT (cb.status = 'open' AND cb.respond_by IS NOT NULL AND cb.respond_by <= (now() AT TIME ZONE 'UTC')::date + 3)`);
 
   await add({ key: 'manual_payouts', severity: 'warn', tab: 'manual', title: 'Ручные выплаты ждут сотрудника',
     hint: 'Выигрыш сверх депозитов: переведи игроку и отметь с номером перевода. Крупные — сначала одобрение.' },

@@ -27,6 +27,8 @@ form input{flex:1;min-width:220px}.ok{color:var(--ok)}.bad{color:var(--bad)}.log
 
   app.get('/testpay', async (_req, reply) => {
     const keys = [...sim.keys.values()].reverse();
+    const disputed = new Set(sim.operations.filter((o) => o.type === 'chargeback').map((o) => o.paymentId));
+    const paid = [...sim.payments.values()].filter((p) => p.status === 'success' && !disputed.has(p.id)).reverse().slice(0, 10);
     const cards = keys.map((k) => {
       const ep = k.endpoint;
       const last = ep?.lastDelivery
@@ -41,13 +43,19 @@ form input{flex:1;min-width:220px}.ok{color:var(--ok)}.bad{color:var(--bad)}.log
   <form method="post" action="/testpay/webhooks/test"><input type="hidden" name="key" value="${esc(k.key)}"><button>Отправить тестовое событие</button></form>
   <form method="post" action="/testpay/webhooks/roll"><input type="hidden" name="key" value="${esc(k.key)}"><button class="ghost">Перевыпустить секрет</button></form>
   ${last}` : '<div class="muted">Секрет подписи появится после сохранения адреса.</div>'}
+  <div class="muted">Выписка операций по этому ключу — загрузи в борде: «Контроль → Сверка с провайдером»</div>
+  <a href="/testpay/report.csv?key=${encodeURIComponent(k.key)}" download="testpay-report.csv">Скачать выписку (CSV)</a>
 </div>`;
     }).join('');
     return reply.type('text/html; charset=utf-8').send(page('TestPay · кабинет', `
 <div class="logo">TestPay</div><h1>Кабинет мерчанта (учебный)</h1>
 <p class="muted">Так выглядит подключение у большинства провайдеров: API-ключ → адрес вебхука → секрет подписи → тестовое событие. Денег здесь нет.</p>
 <form method="post" action="/testpay/keys"><button>Создать API-ключ</button></form>
-${cards || '<p class="muted">Ключей пока нет.</p>'}`));
+${cards || '<p class="muted">Ключей пока нет.</p>'}
+${paid.length ? `<div class="card"><b>Оплаты</b><div class="muted">«Оспорить» — как будто игрок пошёл в банк: в выписке появится чарджбэк.</div>
+${paid.map((p) => `<form method="post" action="/testpay/payments/${esc(p.id)}/dispute"><code>${esc(p.id)}</code>
+ <span>${esc(`${p.amount / 100n}.${(p.amount % 100n).toString().padStart(2, '0')} ${p.currency}`)}</span><button class="ghost">Оспорить</button></form>`).join('')}</div>` : ''}
+`));
   });
 
   app.post('/testpay/keys', async (_req, reply) => { sim.createKey(); return reply.redirect('/testpay', 303); });
@@ -70,6 +78,17 @@ ${cards || '<p class="muted">Ключей пока нет.</p>'}`));
     if (req.body?.key) sim.rollSecret(req.body.key);
     return reply.redirect('/testpay', 303);
   });
+
+  app.post<{ Params: { id: string } }>('/testpay/payments/:id/dispute', async (req, reply) => {
+    sim.dispute(req.params.id);
+    return reply.redirect('/testpay', 303);
+  });
+
+  // Выписка по одному API-ключу (= один мерчант-аккаунт), как экспорт в кабинете настоящего провайдера.
+  app.get<{ Querystring: { key?: string } }>('/testpay/report.csv', async (req, reply) => reply
+    .header('content-type', 'text/csv; charset=utf-8')
+    .header('content-disposition', 'attachment; filename="testpay-report.csv"')
+    .send(sim.reportCsv(req.query.key || undefined)));
 
   app.get<{ Params: { id: string } }>('/testpay/pay/:id', async (req, reply) => {
     const p = sim.payments.get(req.params.id);
