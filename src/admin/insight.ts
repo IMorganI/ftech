@@ -27,6 +27,7 @@ const ago = (d: Date) => {
 const DECLINE: Record<string, string> = {
   player_self_excluded: 'игрок в самоисключении', country_not_licensed: 'страна игрока вне лицензии', kyc_rejected: 'KYC отклонён',
   kyc_required: 'нужен подтверждённый KYC', player_limit_exceeded: 'превышен лимит игрока', no_route: 'нет подходящего аккаунта',
+  capacity_exhausted: 'лимиты всех подходящих аккаунтов заполнены',
   all_attempts_failed: 'отказ на всех попытках', provider_unavailable: 'провайдер не ответил, срок оплаты истёк — без каскада',
   amount_over_limit: 'больше максимальной выплаты оператора',
 };
@@ -187,6 +188,11 @@ function assess(tx: any, attempts: any[], legs: any[], issues: any[], deliveries
     if (tx.status === 'success') return { state: { tone: 'ok', title: 'Зачислен', detail: `Деньги на аккаунте провайдера; платформа заработала ${fmt(tx.platform_fee ?? 0, cur)}` }, next };
     if (tx.status === 'declined') {
       if (tx.decline_code === 'provider_unavailable') next.push({ who: 'site', text: 'Сайт может предложить игроку создать новый депозит' });
+      if (tx.decline_code === 'capacity_exhausted') {
+        const max = tx.decline_details?.maxAmountNow;
+        next.push({ who: 'site', text: max ? `Сайт может предложить игроку сумму до ${fmt(max, cur)}` : 'Сейчас принять нельзя ни одной суммы' },
+          { who: 'staff', tab: 'accounts', text: 'Подними лимиты, включи резервный аккаунт или подключи новый' });
+      }
       return { state: { tone: 'warn', title: 'Отклонён', detail: DECLINE[tx.decline_code] ?? tx.decline_code ?? '' }, next };
     }
     const a = attempts.find((x) => x.status === 'pending');

@@ -65,6 +65,7 @@ const STATUS = {
 };
 const pill = (status) => { const [c, t] = STATUS[status] || ['m', status]; return h('span', { class: `pill ${c}` }, t); };
 const DECLINE = {
+  capacity_exhausted: 'лимиты аккаунтов заполнены',
   player_self_excluded: 'самоисключение', country_not_licensed: 'страна вне лицензии', kyc_rejected: 'KYC отклонён',
   kyc_required: 'нужен KYC', player_limit_exceeded: 'лимит игрока', no_route: 'нет маршрута', all_attempts_failed: 'отказ провайдеров',
   provider_unavailable: 'провайдер не ответил (без каскада)', amount_over_limit: 'больше лимита выплаты',
@@ -541,18 +542,70 @@ async function viewOverview(main) {
 
 // ---------- платёжные аккаунты ----------
 
-async function viewAccounts(main) {
-  const accounts = await api('GET', '/admin/v1/accounts');
-  const active = accounts.filter((a) => a.enabled).length;
-  put(main, h('section', { class: 'panel' },
-    h('div', { class: 'row' }, h('h2', null, 'Платёжные аккаунты'), h('span', { class: 'note' }, `${active} из ${accounts.length} включены`)),
-    h('p', { class: 'note' }, 'Аккаунты у платёжных провайдеров, между которыми распределяются депозиты. Шкала показывает, сколько дневного лимита уже использовано; черта — порог, после которого платежи уходят на следующий аккаунт.'),
-    accounts.length ? h('div', { class: 'accs' }, accounts.map((a) => accountCard(a)))
-      : h('p', { class: 'note' }, 'Аккаунтов пока нет.'),
-    h('p', { class: 'note' }, 'Подключить новый аккаунт и ввести его ключи — во вкладке «Подключения».')));
+const durText = (min) => (min < 60 ? `${min} мин` : `${Math.floor(min / 60)} ч${min % 60 ? ` ${min % 60} мин` : ''}`);
+
+function capacityCard(c) {
+  const lim = Number(c.limit) || 1;
+  const p = c.tiers.primary, r = c.tiers.reserve;
+  const w = (v) => `width:${Math.min(100, (Number(v) / lim) * 100)}%`;
+  const soon = c.exhaustInMin !== null && c.exhaustInMin < c.resetInMin;
+  const at = soon ? new Date(Date.now() + c.exhaustInMin * 60000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : null;
+  const tone = c.fillPct >= 90 || (soon && c.exhaustInMin < 120) ? 'bad' : c.fillPct >= 70 || soon ? 'warn' : 'ok';
+  return h('section', { class: `panel cap ${tone}` },
+    h('div', { class: 'row' }, h('h2', null, `Ёмкость на сегодня · ${c.currency}`),
+      h('span', { class: `pill ${tone}` }, c.fillPct >= 90 ? 'почти исчерпана' : soon && c.exhaustInMin < 120 ? `при таком темпе — на ${durText(c.exhaustInMin)}`
+        : c.fillPct >= 70 ? 'заканчивается' : soon ? 'до конца дня не хватит' : 'запас есть')),
+    h('div', { class: 'cap-main' },
+      h('div', null, h('div', { class: 'kpi-label' }, 'Можно принять ещё'), h('b', { class: 'cap-free' }, money(c.free, c.currency)),
+        h('div', { class: 'note' }, `из ${money(c.limit, c.currency)} · занято ${c.fillPct}%`)),
+      h('div', null, h('div', { class: 'kpi-label' }, 'Темп за последний час'), h('b', { class: 'cap-rate' }, `${money(c.ratePerHour, c.currency)}/ч`),
+        h('div', { class: 'note' }, soon ? `при таком темпе лимиты закончатся через ${durText(c.exhaustInMin)} — около ${at}`
+          : `лимиты обнулятся через ${durText(c.resetInMin)} — до этого хватит`))),
+    h('div', { class: 'capbar', role: 'img', 'aria-label': `Занято ${c.fillPct}%` },
+      h('i', { class: 'p-taken', style: w(p.taken) }), h('i', { class: 'p-free', style: w(p.free) }),
+      h('i', { class: 'r-taken', style: w(r.taken) }), h('i', { class: 'r-free', style: w(r.free) })),
+    h('div', { class: 'legend' },
+      h('span', { class: 'sw p-taken' }), `основные: занято ${money(p.taken, c.currency)}`, h('span', { class: 'sw p-free' }), `свободно ${money(p.free, c.currency)}`,
+      Number(r.limit) ? [h('span', { class: 'sw r-taken' }), `резерв: занято ${money(r.taken, c.currency)}`, h('span', { class: 'sw r-free' }), `свободно ${money(r.free, c.currency)}`] : ' · резервных аккаунтов нет'));
 }
 
-function accountCard(a) {
+async function viewAccounts(main) {
+  const [accounts, cap] = await Promise.all([api('GET', '/admin/v1/accounts'), api('GET', '/admin/v1/capacity')]);
+  const capAcc = new Map(cap.currencies.flatMap((c) => c.accounts.map((a) => [a.id, a])));
+  const modeOf = new Map(cap.operators.map((o) => [o.id, o.routing_mode]));
+  const active = accounts.filter((a) => a.enabled).length;
+  const group = (tier) => accounts.filter((a) => (a.tier || 'primary') === tier);
+  const MODES = [['fill', 'По порядку'], ['weights', 'По весам']];
+  put(main,
+    cap.currencies.length ? cap.currencies.map(capacityCard) : h('section', { class: 'panel hint' }, h('p', null, 'Нет включённых аккаунтов — принимать платежи некуда.')),
+    h('section', { class: 'panel' },
+      h('h2', null, 'Как распределяются платежи'),
+      h('ol', { class: 'steps' },
+        h('li', null, h('b', null, 'Подходящие аккаунты: '), 'валюта, страна игрока, сумма в диапазоне аккаунта, и хватает лимита на этот платёж (дневного и месячного, с учётом порога переключения).'),
+        h('li', null, h('b', null, 'Основные, резерв — только если основные не подходят. '), 'Резерв держи для пиков и сбоев.'),
+        h('li', null, h('b', null, 'Прошлый аккаунт игрока (липкость), '), 'если он подходит: банки спокойнее относятся к платежам на того же мерчанта.'),
+        h('li', null, h('b', null, 'Приоритет, затем режим оператора: '), '«по порядку» — дешевле комиссия, следующий аккаунт после заполнения; «по весам» — оборот дня делится по долям (60/30/10), поток ровный.'),
+        h('li', null, h('b', null, 'Нигде не хватает лимита — '), 'сайт получает отказ capacity_exhausted и сумму, которую можно принять сейчас (может предложить игроку меньше).')),
+      cap.operators.length ? h('div', { class: 'stack' }, cap.operators.map((o) => h('div', { class: 'row start' },
+        h('span', null, h('b', null, o.name), ': '),
+        can('admin') ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Режим распределения' }, MODES.map(([id, label]) =>
+          h('button', { class: o.routing_mode === id ? 'on' : '', 'aria-pressed': o.routing_mode === id, onclick: async () => {
+            await api('PATCH', `/admin/v1/operators/${o.id}`, { routingMode: id }); renderShell(); } }, label)))
+          : h('span', { class: 'pill n' }, MODES.find(([id]) => id === o.routing_mode)[1])))) : null),
+    h('section', { class: 'panel' },
+      h('div', { class: 'row' }, h('h2', null, 'Основные аккаунты'), h('span', { class: 'note' }, `${active} из ${accounts.length} включены`)),
+      h('p', { class: 'note' }, 'Шкала — сколько дневного лимита использовано; черта — порог, после которого платежи уходят на следующий аккаунт.'),
+      group('primary').length ? h('div', { class: 'accs' }, group('primary').map((a) => accountCard(a, capAcc.get(a.id), modeOf.get(a.operator_id))))
+        : h('p', { class: 'note' }, 'Основных аккаунтов нет.')),
+    h('section', { class: 'panel' },
+      h('h2', null, 'Резерв'),
+      h('p', { class: 'note' }, 'Получают платежи, только когда ни один основной не подходит. Перевести аккаунт в резерв — кнопка «Лимиты» у аккаунта.'),
+      group('reserve').length ? h('div', { class: 'accs' }, group('reserve').map((a) => accountCard(a, capAcc.get(a.id), modeOf.get(a.operator_id))))
+        : h('p', { class: 'note' }, 'Резервных аккаунтов нет.')),
+    h('p', { class: 'note' }, 'Подключить новый аккаунт и ввести его ключи — в «Операторы и аккаунты».'));
+}
+
+function accountCard(a, ca, mode) {
   const cap = Number(a.daily_cap), used = Number(a.used_today), res = Number(a.reserved_today);
   const fill = (used + res) / cap, mark = a.switch_at_bps / 100;
   const lvl = fill * 100 >= mark ? 'full' : fill >= 0.75 ? 'warn' : 'ok';
@@ -573,6 +626,7 @@ function accountCard(a) {
       h('span', null, 'Лимит в месяц'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'нет'),
       h('span', null, 'Комиссия провайдера'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
       h('span', null, 'Приоритет'), h('span', null, a.priority),
+      mode === 'weights' && a.enabled ? [h('span', null, 'Вес'), h('span', null, ca ? `${a.weight} → цель ${ca.targetPct}% · сегодня ${ca.sharePct}%` : String(a.weight))] : null,
       h('span', null, 'Переключать на'), h('span', null, `${mark}% лимита`),
       can('admin') ? [h('span', null, 'ID'), h('span', { class: 'id-cell', title: 'Нужен для адреса вебхука провайдера' }, a.id)] : null),
     h('div', { class: 'tags' }, a.currencies.map((c) => h('span', { class: 'tag' }, c)), a.countries.map((c) => h('span', { class: 'tag' }, c))));
@@ -591,6 +645,8 @@ function accountCard(a) {
         field('Порог, %', h('input', { name: 'switchAt', value: a.switch_at_bps / 100, type: 'number', min: 1, max: 100, step: 0.01 })),
         field('Комиссия, %', h('input', { name: 'fee', value: a.fee_bps / 100, type: 'number', min: 0, max: 100, step: 0.01 })),
         field('Приоритет', h('input', { name: 'priority', value: a.priority, type: 'number', min: -1000, max: 1000 })),
+        field('Уровень', h('select', { name: 'tier' }, [['primary', 'основной'], ['reserve', 'резерв']].map(([v, t]) => { const o = h('option', { value: v }, t); if ((a.tier || 'primary') === v) o.selected = true; return o; }))),
+        field('Вес (режим «по весам»)', h('input', { name: 'weight', value: a.weight ?? 100, type: 'number', min: 1, max: 10000 })),
         h('div', { class: 'row start' }, h('button', { class: 'primary sm', type: 'submit' }, 'Сохранить'),
           h('button', { class: 'sm', type: 'button', onclick: () => { state.cache.editing = null; renderShell(); } }, 'Отмена')),
       ], async (v) => {
@@ -600,6 +656,7 @@ function accountCard(a) {
         if (v.monthlyCap.trim() && !monthlyCap) throw new Error('Месячный лимит — сумма больше нуля или пусто');
         await api('PATCH', `/admin/v1/accounts/${a.id}`, {
           dailyCap, monthlyCap, switchAtBps: Math.round(Number(v.switchAt) * 100), feeBps: Math.round(Number(v.fee) * 100), priority: Number(v.priority),
+          tier: v.tier, weight: Number(v.weight),
         });
         state.cache.editing = null; renderShell();
       });
@@ -909,7 +966,8 @@ function viewSandbox(main) {
     h('thead', null, h('tr', null, ['Платёж', 'Сумма', 'Ответ', ''].map((t) => h('th', null, t)))),
     h('tbody', null, sb.made.map((d) => h('tr', null,
       h('td', { class: 'n' }, d.id.slice(0, 8)), h('td', { class: 'n' }, money(d.amount, d.currency)),
-      h('td', null, pill(d.status), d.declineCode ? h('div', { class: 'note' }, DECLINE[d.declineCode] || d.declineCode) : null),
+      h('td', null, pill(d.status), d.declineCode ? h('div', { class: 'note' }, DECLINE[d.declineCode] || d.declineCode,
+        d.declineDetails?.maxAmountNow ? ` · сейчас можно до ${money(d.declineDetails.maxAmountNow, d.currency)}` : '') : null),
       h('td', null, d.paymentUrl ? h('a', { href: d.paymentUrl, target: '_blank', rel: 'noopener' }, 'Открыть страницу оплаты ↗') : null)))))
     : h('p', { class: 'note' }, 'Созданные здесь платежи появятся в этом списке и во вкладке «Платежи».'));
   renderMade();
