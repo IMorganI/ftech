@@ -18,7 +18,8 @@
     "admin:create": "tsx src/admin/create-user.ts",
     "demo": "bash .devcontainer/start.sh --foreground",
     "up": "bash scripts/up.sh",
-    "telegram:setup": "tsx src/notify/setup-telegram.ts"
+    "telegram:setup": "tsx src/notify/setup-telegram.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.5",
@@ -29,6 +30,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "@types/qrcode": "1.5.6",

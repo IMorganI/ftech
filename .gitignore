@@ -9,3 +9,6 @@ coverage/
 DEMO-CREDENTIALS.md
 .data/
 deploy/.env
+e2e/.state/
+playwright-report/
+test-results/

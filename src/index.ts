@@ -21,7 +21,7 @@ const providers = new ProviderRegistry().register(new VivaAdapter());
 
 let mock: MockProvider | undefined;
 if (config.MOCK_PROVIDER_ENABLED) {
-  mock = new MockProvider({ publicBaseUrl: config.PUBLIC_BASE_URL, instantDeclineRate: 0.1, duplicateWebhookRate: 0.2 });
+  mock = new MockProvider({ publicBaseUrl: config.PUBLIC_BASE_URL, instantDeclineRate: config.MOCK_DECLINE_RATE, duplicateWebhookRate: config.MOCK_DUPLICATE_WEBHOOK_RATE });
   providers.register(new MockAdapter(mock));
 }
 // Учебный провайдер с подписью вебхуков — для проверки сценария подключения «как у настоящих».
