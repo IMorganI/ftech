@@ -206,3 +206,27 @@ ul.checks li.ok > span { color: var(--ok); font-weight: 700; }
 ul.checks li.bad > span { color: var(--bad); font-weight: 700; }
 .site-row { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 8px; }
 summary { cursor: pointer; }
+
+/* аналитика */
+.filters { gap: 12px; }
+.filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.flabel { font-size: 12px; color: var(--muted); min-width: 80px; }
+.filter-row select { width: auto; min-width: 180px; }
+.dates { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.dates label { grid-auto-flow: column; align-items: center; }
+.dates input { width: auto; }
+.seg { flex-wrap: wrap; }
+table.analytics td { vertical-align: middle; }
+table.analytics .name { font-weight: 600; min-width: 150px; }
+table.analytics th { white-space: normal; min-width: 70px; }
+table.analytics .th-sub { font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+table.analytics tfoot td { border-top: 2px solid var(--line); border-bottom: 0; font-weight: 600; background: var(--bg); }
+.cell-meter { display: grid; gap: 4px; min-width: 90px; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+.meter { height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--ok); border-radius: 3px; }
+.meter.low i { background: var(--warn); }
+.meter.alt i { background: var(--accent); }
+.meter.share { margin-top: 4px; min-width: 80px; }
+.meter.share i { background: var(--accent); opacity: .6; }
+details.explain summary { font-size: 13px; color: var(--accent); }
+details.explain ul { margin-top: 8px; }
