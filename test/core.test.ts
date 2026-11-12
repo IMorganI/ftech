@@ -9,6 +9,8 @@ import { generateApiKey } from '../src/auth.js';
 import { ProviderRegistry } from '../src/providers/types.js';
 import { MockAdapter, MockProvider } from '../src/providers/mock.js';
 import { MapSecretStore } from '../src/secrets.js';
+import { processInbox } from '../src/payments/flow.js';
+import type { ProviderAdapter } from '../src/providers/types.js';
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -152,6 +154,57 @@ describe.skipIf(!url)('Ядро', () => {
       await deposit(1500, { depositLimitDaily: 2000 });
       expect((await deposit(1500, {}, 'USD')).json().status).toBe('pending');
       expect((await deposit(1500)).json().declineCode).toBe('player_limit_exceeded');
+    });
+  });
+
+  // ---------- 2. inbox вебхуков ----------
+
+  describe('обработка вебхуков до конца', () => {
+    let statusDown = false;
+    beforeEach(() => {
+      statusDown = false;
+      const real = new MockAdapter(mock);
+      const flaky: ProviderAdapter = {
+        name: 'mock', manifest: real.manifest,
+        createPayment: (c, r) => real.createPayment(c, r),
+        getStatus: async (c, ref) => { if (statusDown) throw new Error('provider 503'); return real.getStatus(c, ref); },
+        paidAmount: (c, ref) => real.paidAmount(c, ref),
+        verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
+      };
+      providers.register(flaky);
+    });
+    const txStatus = async (id: string) => (await pool.query(`SELECT status FROM transactions WHERE id = $1`, [id])).rows[0].status;
+    const event = async () => (await pool.query(`SELECT event_id, processed_at, attempts, last_error, result FROM provider_webhook_events`)).rows[0];
+
+    it('упало при обработке — повторная доставка того же события обрабатывает его, а не считает повтором', async () => {
+      await account();
+      const d = (await deposit(1000)).json();
+      const ref = d.paymentUrl.split('/').pop();
+      statusDown = true;
+      await mock.complete(ref, 'success'); // вебхук пришёл, но провайдер не ответил на запрос статуса
+      expect(await txStatus(d.id)).toBe('pending');
+      const e1 = await event();
+      expect(e1).toMatchObject({ processed_at: null, attempts: 1, last_error: 'provider 503' });
+
+      statusDown = false;
+      await mock.sendWebhook(mock.payments.get(ref)!, e1.event_id); // провайдер повторяет то же событие
+      expect(await txStatus(d.id)).toBe('success');
+      expect(await event()).toMatchObject({ attempts: 2, result: 'processed', last_error: null });
+
+      await mock.sendWebhook(mock.payments.get(ref)!, e1.event_id); // а вот это уже настоящий повтор
+      const log = (await pool.query(`SELECT outcome, reason FROM provider_webhook_log ORDER BY id`)).rows.map((r) => r.outcome);
+      expect(log).toEqual(['error', 'accepted', 'duplicate']);
+    });
+
+    it('если провайдер больше не присылает событие — его дообрабатывает фоновая задача', async () => {
+      await account();
+      const d = (await deposit(1000)).json();
+      statusDown = true;
+      await mock.complete(d.paymentUrl.split('/').pop(), 'success');
+      statusDown = false;
+      expect(await processInbox({ pool, providers, secrets: new MapSecretStore({ MOCK: 'test-secret' }) }, 0)).toEqual({ checked: 1, processed: 1 });
+      expect(await txStatus(d.id)).toBe('success');
+      expect(await processInbox({ pool, providers, secrets: new MapSecretStore({ MOCK: 'test-secret' }) }, 0)).toEqual({ checked: 0, processed: 0 });
     });
   });
 });

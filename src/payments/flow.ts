@@ -180,26 +180,83 @@ export async function handleProviderWebhook(
     return 'test';
   }
 
-  const fresh = (await d.pool.query(
+  await d.pool.query(
     `INSERT INTO provider_webhook_events (merchant_account_id, event_id, provider_ref, body)
-     VALUES ($1, $2, $3, $4) ON CONFLICT (merchant_account_id, event_id) DO NOTHING RETURNING id`,
-    [acc.id, hook.eventId, hook.providerRef, rawBody],
-  )).rows[0];
+     VALUES ($1, $2, $3, $4) ON CONFLICT (merchant_account_id, event_id) DO NOTHING`,
+    [acc.id, hook.eventId, hook.providerRef, rawBody]);
   const meta = { eventId: hook.eventId, providerRef: hook.providerRef, ip };
-  if (!fresh) {
+  const r = await processInboxEvent(d, adapter, creds, acc.id, hook.eventId);
+  if (r.kind === 'done-before') {
     await logWebhook(d, acc.id, 'POST', 'duplicate', { ...meta, reason: 'Повтор уже обработанного события' });
     return 'duplicate';
   }
-  let result: WebhookResult;
-  try { result = await applyProviderStatus(d, adapter, creds, acc.id, hook.providerRef); } catch (err) {
-    await logWebhook(d, acc.id, 'POST', 'error', { ...meta, reason: `Не смогли узнать статус у провайдера: ${(err as Error).message}` });
-    throw err;
+  if (r.kind === 'busy') {
+    await logWebhook(d, acc.id, 'POST', 'duplicate', { ...meta, reason: 'Это событие сейчас обрабатывается' });
+    return 'duplicate';
   }
-  await d.pool.query(`UPDATE provider_webhook_events SET result = $2 WHERE id = $1`, [fresh.id, result]);
+  if (r.kind === 'failed') {
+    await logWebhook(d, acc.id, 'POST', 'error', { ...meta, reason: `Не смогли обработать: ${r.error.message}. Повторим сами` });
+    throw r.error;
+  }
   const RU: Record<string, string> = { processed: 'Статус платежа обновлён', unknown_payment: 'Платёж не наш (нет такого ID)',
     still_pending: 'У провайдера платёж ещё в процессе', issue_recorded: 'Расхождение — добавлено в «Проблемы»' };
-  await logWebhook(d, acc.id, 'POST', 'accepted', { ...meta, reason: RU[result] ?? result });
-  return result;
+  await logWebhook(d, acc.id, 'POST', 'accepted', { ...meta, reason: RU[r.result] ?? r.result });
+  return r.result;
+}
+
+const INBOX_LEASE_SEC = 60;
+const INBOX_MAX_ATTEMPTS = 10;
+
+type InboxOutcome = { kind: 'processed'; result: WebhookResult } | { kind: 'done-before' } | { kind: 'busy' } | { kind: 'failed'; error: Error };
+
+/**
+ * Обработать событие из inbox: взять его в работу (аренда на минуту), применить статус, отметить обработанным.
+ * Ошибка оставляет событие необработанным — его подхватит повторная доставка или processInbox().
+ */
+async function processInboxEvent(d: PaymentDeps, adapter: ProviderAdapter, creds: AccountCredentials, accountId: string, eventId: string): Promise<InboxOutcome> {
+  const claimed = (await d.pool.query(
+    `UPDATE provider_webhook_events SET processing_until = now() + make_interval(secs => $3), attempts = attempts + 1
+     WHERE merchant_account_id = $1 AND event_id = $2 AND processed_at IS NULL
+       AND (processing_until IS NULL OR processing_until < now())
+     RETURNING id, provider_ref`, [accountId, eventId, INBOX_LEASE_SEC])).rows[0];
+  if (!claimed) {
+    const row = (await d.pool.query(
+      `SELECT processed_at FROM provider_webhook_events WHERE merchant_account_id = $1 AND event_id = $2`, [accountId, eventId])).rows[0];
+    return row?.processed_at ? { kind: 'done-before' } : { kind: 'busy' };
+  }
+  try {
+    const result = await applyProviderStatus(d, adapter, creds, accountId, claimed.provider_ref);
+    await d.pool.query(
+      `UPDATE provider_webhook_events SET result = $2, processed_at = now(), processing_until = NULL, last_error = NULL WHERE id = $1`,
+      [claimed.id, result]);
+    return { kind: 'processed', result };
+  } catch (err) {
+    await d.pool.query(`UPDATE provider_webhook_events SET processing_until = NULL, last_error = $2 WHERE id = $1`,
+      [claimed.id, (err as Error).message.slice(0, 500)]);
+    return { kind: 'failed', error: err as Error };
+  }
+}
+
+/** Фоновая обработка событий, которые не удалось обработать сразу (провайдер был недоступен, процесс упал). */
+export async function processInbox(d: PaymentDeps, olderThanSec = 30): Promise<{ checked: number; processed: number }> {
+  const rows = (await d.pool.query(
+    `SELECT e.merchant_account_id AS account_id, e.event_id, p.adapter
+     FROM provider_webhook_events e JOIN merchant_accounts m ON m.id = e.merchant_account_id JOIN providers p ON p.id = m.provider_id
+     WHERE e.processed_at IS NULL AND (e.processing_until IS NULL OR e.processing_until < now())
+       AND e.received_at < now() - make_interval(secs => $1) AND e.attempts < $2
+     ORDER BY e.received_at LIMIT 50`, [olderThanSec, INBOX_MAX_ATTEMPTS])).rows;
+  let processed = 0;
+  for (const r of rows) {
+    try {
+      const adapter = d.providers.get(r.adapter);
+      const out = await processInboxEvent(d, adapter, await credsFor(d, r.account_id), r.account_id, r.event_id);
+      if (out.kind === 'processed') {
+        processed++;
+        await logWebhook(d, r.account_id, 'POST', 'accepted', { eventId: r.event_id, reason: `Обработано повторно: ${out.result}` });
+      }
+    } catch { /* ключи недоступны и т. п. — попробуем позже */ }
+  }
+  return { checked: rows.length, processed };
 }
 
 async function applyProviderStatus(
