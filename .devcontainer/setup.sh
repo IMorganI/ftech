@@ -52,7 +52,7 @@ cat > DEMO-CREDENTIALS.md <<MD
 |---|---|
 | Email | \`admin@ftech.local\` |
 | Временный пароль | \`${TEMP_PW}\` |
-| API-ключ демо-сайта (для «Песочницы») | \`${API_KEY}\` |
+| API-ключ демо-сайта (для «Тест-платежа») | \`${API_KEY}\` |
 
 При первом входе борда попросит отсканировать QR-код в Google Authenticator / 1Password / Authy
 и сменить временный пароль.

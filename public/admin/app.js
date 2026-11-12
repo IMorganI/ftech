@@ -695,7 +695,7 @@ async function viewPayments(main) {
         h('div', { class: 'note' }, t.type === 'payout' ? 'выплата' : 'депозит')),
       h('td', null, pill(t.status), t.decline_code ? h('div', { class: 'note' }, DECLINE[t.decline_code] || t.decline_code) : null),
       h('td', { class: 'dim' }, t.account || '—'), h('td', { class: 'n' }, t.attempts)))
-      : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
+      : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Тест-платёж».'))));
 
   put(main, h('div', { class: 'grid2 pay' },
     h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter),
