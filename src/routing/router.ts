@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Pool } from '../db/pool.js';
 import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
+import { applyRestrictions, type KycStatus } from '../players/restrictions.js';
 
 /*
  * Роутер депозитов.
@@ -19,7 +20,7 @@ import { enqueueSiteEvent } from '../webhooks/outbox.js';
  * успех превращает резерв в оборот и пишет проводки, отказ снимает резерв и пробует следующий аккаунт.
  */
 
-export type KycStatus = 'none' | 'pending' | 'verified' | 'rejected';
+export type { KycStatus };
 
 export interface DepositRequest {
   siteId: string;
@@ -31,9 +32,10 @@ export interface DepositRequest {
   player: {
     externalId: string;
     country: string;
-    kyc: KycStatus;
-    depositLimitDaily: bigint | null;
-    selfExcluded: boolean;
+    /** Необязательные подсказки сайта. Из депозита ограничения можно только ужесточить (см. players/restrictions.ts). */
+    kyc?: KycStatus;
+    depositLimitDaily?: bigint | null;
+    selfExcluded?: boolean;
   };
 }
 
@@ -140,15 +142,19 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
   const p = req.player;
   // Upsert игрока сразу блокирует его строку: параллельные депозиты одного игрока идут по очереди,
   // поэтому его дневной лимит нельзя обойти двумя одновременными запросами.
-  const player = (await c.query(
-    `INSERT INTO players (site_id, external_id, country, kyc, deposit_limit_daily, self_excluded)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (site_id, external_id) DO UPDATE SET
-       country = EXCLUDED.country, kyc = EXCLUDED.kyc, deposit_limit_daily = EXCLUDED.deposit_limit_daily,
-       self_excluded = EXCLUDED.self_excluded, updated_at = now()
-     RETURNING id, sticky_account_id`,
-    [req.siteId, p.externalId, p.country, p.kyc, p.depositLimitDaily, p.selfExcluded],
+  // Ограничения из запроса НЕ перезаписывают сохранённые: применяются только ужесточения.
+  const inserted = (await c.query(
+    `INSERT INTO players (site_id, external_id, country) VALUES ($1, $2, $3)
+     ON CONFLICT (site_id, external_id) DO UPDATE SET country = EXCLUDED.country, updated_at = now()
+     RETURNING *`,
+    [req.siteId, p.externalId, p.country],
   )).rows[0];
+  const delay = (await c.query(`SELECT limit_increase_delay_hours FROM operators WHERE id = $1`, [req.operatorId])).rows[0].limit_increase_delay_hours;
+  const player = await applyRestrictions(c, inserted, {
+    selfExcluded: p.selfExcluded, kyc: p.kyc,
+    // null в депозите не снимает лимит — снятие только через API ограничений.
+    depositLimitDaily: p.depositLimitDaily === null ? undefined : p.depositLimitDaily,
+  }, 'deposit', { increaseDelayHours: delay });
 
   const op = (await c.query(
     `SELECT licenses, kyc_required_above, max_attempts FROM operators WHERE id = $1`, [req.operatorId],
@@ -162,7 +168,7 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
     )).rows[0]);
 
   // 1. Проверки игрока
-  const decline = await playerDecline(c, req, player.id, op);
+  const decline = await playerDecline(c, req, player, op);
   if (decline) return insertTx('declined', null, decline);
 
   // 2–4. Выбор аккаунта
@@ -180,22 +186,23 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
 }
 
 async function playerDecline(
-  c: Client, req: DepositRequest, playerId: string,
+  c: Client, req: DepositRequest, player: { id: string; self_excluded: boolean; kyc: KycStatus; deposit_limit_daily: bigint | null },
   op: { licenses: string[]; kyc_required_above: bigint | null },
 ): Promise<DeclineCode | null> {
-  const p = req.player;
-  if (p.selfExcluded) return 'player_self_excluded';
-  if (!op.licenses.map((l) => l.trim()).includes(p.country)) return 'country_not_licensed';
-  if (p.kyc === 'rejected') return 'kyc_rejected';
-  if (p.kyc !== 'verified' && op.kyc_required_above !== null && req.amount > op.kyc_required_above) return 'kyc_required';
-  if (p.depositLimitDaily !== null) {
+  // Решения принимаются по СОХРАНЁННЫМ ограничениям игрока, а не по тому, что прислал запрос.
+  if (player.self_excluded) return 'player_self_excluded';
+  if (!op.licenses.map((l) => l.trim()).includes(req.player.country)) return 'country_not_licensed';
+  if (player.kyc === 'rejected') return 'kyc_rejected';
+  if (player.kyc !== 'verified' && op.kyc_required_above !== null && req.amount > op.kyc_required_above) return 'kyc_required';
+  if (player.deposit_limit_daily !== null) {
+    // Лимит игрока — в валюте депозита: суммы разных валют не складываются.
     const today = (await c.query(
       `SELECT coalesce(sum(amount), 0)::bigint AS total FROM transactions
-       WHERE player_id = $1 AND type = 'deposit' AND status IN ('pending', 'success')
+       WHERE player_id = $1 AND type = 'deposit' AND currency = $2 AND status IN ('pending', 'success')
          AND created_at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`,
-      [playerId],
+      [player.id, req.currency],
     )).rows[0].total as bigint;
-    if (today + req.amount > p.depositLimitDaily) return 'player_limit_exceeded';
+    if (today + req.amount > player.deposit_limit_daily) return 'player_limit_exceeded';
   }
   return null;
 }

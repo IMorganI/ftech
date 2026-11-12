@@ -1,3 +1,4 @@
+import { applyRestrictions, lockPlayer } from '../players/restrictions.js';
 import { createHash } from 'node:crypto';
 import type { Pool } from '../db/pool.js';
 import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
@@ -87,9 +88,10 @@ async function insertPayout(c: Client, req: PayoutRequest, h: string): Promise<s
       [req.siteId, playerId, req.amount, req.currency, status, decline, req.idempotencyKey, h])).rows[0].id as string;
 
   if (!player) throw new UnknownPlayerError();
-  if (req.player.kyc) {
-    await c.query(`UPDATE players SET kyc = $2, updated_at = now() WHERE id = $1`, [player.id, req.player.kyc]);
-    player.kyc = req.player.kyc;
+  if (req.player.kyc && req.player.kyc !== player.kyc) {
+    // Через общий модуль ограничений: изменение KYC попадает в журнал игрока.
+    const updated = await applyRestrictions(c, await lockPlayer(c, player.id), { kyc: req.player.kyc }, 'payout', { increaseDelayHours: 24 });
+    player.kyc = updated.kyc;
   }
   if (op.payout_kyc_required && player.kyc !== 'verified') return insert(player.id, 'declined', 'kyc_required');
 

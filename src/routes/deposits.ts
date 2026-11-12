@@ -16,9 +16,10 @@ const depositBody = z.object({
   player: z.object({
     id: z.string().min(1).max(128),
     country: z.string().regex(/^[A-Z]{2}$/, 'Код страны ISO 3166-1, например MT'),
-    kyc: z.enum(['none', 'pending', 'verified', 'rejected']).default('none'),
-    depositLimitDaily: money.nullable().default(null),
-    selfExcluded: z.boolean().default(false),
+    // Необязательные. Из депозита ограничения можно только ужесточить; снять — PUT /v1/players/:id/restrictions.
+    kyc: z.enum(['none', 'pending', 'verified', 'rejected']).optional(),
+    depositLimitDaily: money.nullable().optional(),
+    selfExcluded: z.boolean().optional(),
   }),
 });
 
