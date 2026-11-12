@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { isCurrency } from '../money/currencies.js';
 import { siteAuth } from '../auth.js';
 import { getTransaction, serializeTx, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
 import type { PaymentDeps } from '../payments/flow.js';
@@ -10,7 +11,7 @@ const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 
 const payoutBody = z.object({
   amount: money,
-  currency: z.string().regex(/^[A-Z]{3}$/, 'Код валюты ISO 4217, например EUR'),
+  currency: z.string().regex(/^[A-Z]{3}$/, 'Код валюты ISO 4217, например EUR').refine(isCurrency, 'Неизвестный код валюты ISO 4217'),
   withdrawalId: z.string().min(1).max(128).regex(/^[\w.:\-]+$/, 'ID вывода в системе казино: буквы, цифры, _ . : -'),
   player: z.object({
     id: z.string().min(1).max(128),

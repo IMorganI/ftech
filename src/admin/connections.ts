@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { isCurrency } from '../money/currencies.js';
 import { decrypt } from '../crypto.js';
 import type { ProviderRegistry, ProviderAdapter } from '../providers/types.js';
 import type { SecretStore } from '../secrets.js';
@@ -39,7 +40,7 @@ export async function connectionRoutes(app: FastifyInstance, d: ConnectionDeps) 
   app.post('/admin/v1/connections/accounts', admin, async (req, reply) => {
     const b = z.object({
       operatorId: uuid, adapter: z.string().min(1).max(40), name: z.string().min(1).max(200),
-      currencies: z.array(z.string().regex(/^[A-Z]{3}$/)).length(1, 'Одна валюта на аккаунт: лимиты считаются в ней'), countries: z.array(z.string().regex(/^[A-Z]{2}$/)).min(1),
+      currencies: z.array(z.string().regex(/^[A-Z]{3}$/).refine(isCurrency, 'Неизвестный код валюты ISO 4217')).length(1, 'Одна валюта на аккаунт: лимиты считаются в ней'), countries: z.array(z.string().regex(/^[A-Z]{2}$/)).min(1),
       minAmount: money, maxAmount: money, dailyCap: money, monthlyCap: money.nullable().default(null),
       feeBps: z.number().int().min(0).max(10000).default(0), priority: z.number().int().min(-1000).max(1000).default(0),
     }).safeParse(req.body);

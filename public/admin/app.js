@@ -606,6 +606,7 @@ async function viewAccounts(main) {
 }
 
 function accountCard(a, ca, mode) {
+  const cur = a.currencies[0];
   const cap = Number(a.daily_cap), used = Number(a.used_today), res = Number(a.reserved_today);
   const fill = (used + res) / cap, mark = a.switch_at_bps / 100;
   const lvl = fill * 100 >= mark ? 'full' : fill >= 0.75 ? 'warn' : 'ok';
@@ -619,11 +620,12 @@ function accountCard(a, ca, mode) {
       h('i', { class: 'u', style: `width:${Math.min(100, (used / cap) * 100)}%` }),
       h('i', { class: 'r', style: `width:${Math.min(100, (res / cap) * 100)}%` }),
       h('span', { class: 'mark', style: `left:${mark}%` })),
-    h('div', { class: 'nums' }, h('span', null, 'сегодня ', h('b', null, money(a.used_today)), ' из ', money(a.daily_cap)), h('span', null, `${(fill * 100).toFixed(1)}%`)),
+    h('div', { class: 'nums' }, h('span', null, 'сегодня ', h('b', null, money(a.used_today)), ' из ', money(a.daily_cap, cur)), h('span', null, `${(fill * 100).toFixed(1)}%`)),
+    a.currencies.length > 1 ? h('div', { class: 'msg warn' }, `Старый аккаунт в нескольких валютах: лимит считается в каждой отдельно, здесь показан ${cur}. Лучше разделить на аккаунты по валютам.`) : null,
     h('div', { class: 'meta' },
-      h('span', null, 'Ждут оплаты'), h('span', null, money(a.reserved_today)),
-      h('span', null, 'Сумма платежа'), h('span', null, `${money(a.min_amount)} – ${money(a.max_amount)}`),
-      h('span', null, 'Лимит в месяц'), h('span', null, a.monthly_cap ? money(a.monthly_cap) : 'нет'),
+      h('span', null, 'Ждут оплаты'), h('span', null, money(a.reserved_today, cur)),
+      h('span', null, 'Сумма платежа'), h('span', null, `${money(a.min_amount)} – ${money(a.max_amount, cur)}`),
+      h('span', null, 'Лимит в месяц'), h('span', null, a.monthly_cap ? money(a.monthly_cap, cur) : 'нет'),
       h('span', null, 'Комиссия провайдера'), h('span', null, `${(a.fee_bps / 100).toFixed(2)}%`),
       h('span', null, 'Приоритет'), h('span', null, a.priority),
       mode === 'weights' && a.enabled ? [h('span', null, 'Вес'), h('span', null, ca ? `${a.weight} → цель ${ca.targetPct}% · сегодня ${ca.sharePct}%` : String(a.weight))] : null,

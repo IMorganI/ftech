@@ -62,6 +62,13 @@ export interface VerifiedWebhook {
 
 export class InvalidWebhookError extends Error {}
 
+/**
+ * Запрос, двигающий деньги, к провайдеру НЕ отправлен (не получили токен, не нашли транзакцию для возврата,
+ * провайдер отказал в авторизации 401/429 до выполнения). В отличие от сетевой ошибки посреди запроса,
+ * здесь точно ничего не произошло: для депозита безопасен каскад, для возврата — повтор позже.
+ */
+export class NotSentError extends Error {}
+
 /** Поле формы ключей провайдера в борде. */
 export interface CredentialField {
   key: string;

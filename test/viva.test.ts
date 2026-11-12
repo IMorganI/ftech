@@ -1,6 +1,7 @@
 // Адаптер Viva Wallet на имитации их API: настоящие запросы в Viva в тестах не уходят.
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { NotSentError } from '../src/providers/types.js';
 import { VivaAdapter, parseVivaCredentials, parseVivaAmount, type HttpFetch } from '../src/providers/viva.js';
 import { InvalidWebhookError, ProviderRegistry } from '../src/providers/types.js';
 import { createPool, type Pool } from '../src/db/pool.js';
@@ -113,6 +114,18 @@ describe('Viva: адаптер', () => {
     expect(await a.createPayment(creds, req())).toMatchObject({ reason: expect.stringMatching(/^viva_http_403: .*Smart Checkout/) });
     v.state.failCreateWith = 503;
     await expect(a.createPayment(creds, req())).rejects.toThrow(/503/);
+    // 401 и 429 — Viva заказ не создавала: это отказ (каскад), а не «неизвестно».
+    for (const code of [401, 429]) {
+      v.state.failCreateWith = code;
+      expect(await a.createPayment(creds, req())).toMatchObject({ kind: 'declined', reason: expect.stringMatching(new RegExp(`^viva_http_${code}`)) });
+    }
+  });
+
+  it('не получили токен — заказ не отправлялся (NotSentError), а не «ответ потерян»', async () => {
+    const v = fakeViva();
+    const bad = { accountId: 'acc', secret: SECRET.replace('"csec"', '"wrong"') };
+    await expect(new VivaAdapter({ fetch: v.fetch }).createPayment(bad, req())).rejects.toBeInstanceOf(NotSentError);
+    expect(v.calls.filter((c) => c.url.endsWith('/checkout/v2/orders'))).toHaveLength(0);
   });
 
   it('статус заказа: 0 — ждёт, 1/2 — отказ, 3 — оплачен', async () => {

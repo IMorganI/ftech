@@ -1,7 +1,7 @@
 import type { Pool } from '../db/pool.js';
 import { withTransaction } from '../db/tx.js';
 import type { SecretStore } from '../secrets.js';
-import { InvalidWebhookError, type ProviderRegistry, type AccountCredentials, type ProviderAdapter } from '../providers/types.js';
+import { InvalidWebhookError, NotSentError, type ProviderRegistry, type AccountCredentials, type ProviderAdapter, type CreatePaymentResult } from '../providers/types.js';
 import { resolveAttempt, getTransactionById, type TransactionView } from '../routing/router.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
 import { accountCredentials, ensureWebhookToken, sameToken } from '../providers/credentials.js';
@@ -46,8 +46,11 @@ const ATTEMPT_SELECT = `
   JOIN transactions t ON t.id = a.transaction_id
   JOIN players pl ON pl.id = t.player_id`;
 
+/** Ошибка до обращения к провайдеру (нет ключей, интеграции): ничего не отправлено. */
+class PreflightError extends Error {}
+
 async function credsFor(d: PaymentDeps, accountId: string, _ref?: string | null): Promise<AccountCredentials> {
-  return accountCredentials(d, accountId);
+  try { return await accountCredentials(d, accountId); } catch (err) { throw new PreflightError((err as Error).message); }
 }
 
 /**
@@ -64,20 +67,26 @@ export async function submitPending(d: PaymentDeps, txId: string): Promise<Trans
     )).rows[0];
     if (!claimed) break;
 
-    let adapter: ProviderAdapter;
-    let result;
+    let result: CreatePaymentResult;
     try {
-      adapter = d.providers.get(claimed.adapter);
-      result = await adapter.createPayment(await credsFor(d, claimed.merchant_account_id, claimed.credentials_ref), {
+      // Интеграция и ключи — до запроса провайдеру: их ошибка значит «ничего не отправлено».
+      const adapter = (() => { try { return d.providers.get(claimed.adapter); } catch (e) { throw new PreflightError((e as Error).message); } })();
+      const creds = await credsFor(d, claimed.merchant_account_id, claimed.credentials_ref);
+      result = await adapter.createPayment(creds, {
         reference: claimed.id, amount: claimed.amount, currency: claimed.currency.trim(),
         country: claimed.country.trim(), returnUrl: claimed.return_url,
       });
     } catch (err) {
-      // Не знаем, создался ли платёж у провайдера, поэтому не каскадим вслепую:
-      // попытка остаётся pending с отметкой unknown, её разберёт сверка (reconcile).
-      await d.pool.query(`UPDATE transaction_attempts SET error = $2, submit_outcome = 'unknown' WHERE id = $1`,
-        [claimed.id, `submission_unknown: ${(err as Error).message}`.slice(0, 500)]);
-      break;
+      const sent = !(err instanceof NotSentError) && !(err instanceof PreflightError);
+      if (sent) {
+        // Запрос ушёл, а ответа нет: провайдер мог создать платёж, поэтому каскада нет —
+        // попытка остаётся pending с отметкой unknown, её разберёт сверка (reconcile).
+        await d.pool.query(`UPDATE transaction_attempts SET error = $2, submit_outcome = 'unknown' WHERE id = $1`,
+          [claimed.id, `submission_unknown: ${(err as Error).message}`.slice(0, 500)]);
+        break;
+      }
+      // Ничего не отправлено (нет ключей, интеграции, токена) — платёж точно не создан, каскад безопасен.
+      result = { kind: 'declined', reason: `not_sent: ${(err as Error).message}`.slice(0, 300) };
     }
 
     if (result.kind === 'redirect') {
@@ -110,6 +119,13 @@ type WebhookOutcome = 'accepted' | 'test' | 'duplicate' | 'rejected' | 'error' |
 /** Журнал входящих вебхуков: что пришло и что мы с этим сделали. Ошибка записи не мешает обработке. */
 async function logWebhook(d: PaymentDeps, accountId: string, method: string, outcome: WebhookOutcome,
   extra: { reason?: string; eventId?: string; providerRef?: string; ip?: string; at?: Date } = {}): Promise<void> {
+  if (outcome === 'rejected') {
+    // Отклонённые пишем не больше 30 в минуту на аккаунт: для разбора хватит, а мусором журнал не забить.
+    const recent = (await d.pool.query(
+      `SELECT count(*)::int AS n FROM provider_webhook_log WHERE merchant_account_id = $1 AND outcome = 'rejected' AND received_at > now() - interval '1 minute'`,
+      [accountId])).rows[0].n;
+    if (recent >= 30) return;
+  }
   await d.pool.query(
     `INSERT INTO provider_webhook_log (merchant_account_id, method, outcome, reason, event_id, provider_ref, ip, received_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, now()))`,
@@ -242,7 +258,7 @@ async function processInboxEvent(d: PaymentDeps, adapter: ProviderAdapter, creds
 /** Фоновая обработка событий, которые не удалось обработать сразу (провайдер был недоступен, процесс упал). */
 export async function processInbox(d: PaymentDeps, olderThanSec = 30): Promise<{ checked: number; processed: number }> {
   const rows = (await d.pool.query(
-    `SELECT e.merchant_account_id AS account_id, e.event_id, p.adapter
+    `SELECT e.merchant_account_id AS account_id, e.event_id, e.provider_ref, p.adapter
      FROM provider_webhook_events e JOIN merchant_accounts m ON m.id = e.merchant_account_id JOIN providers p ON p.id = m.provider_id
      WHERE e.processed_at IS NULL AND (e.processing_until IS NULL OR e.processing_until < now())
        AND e.received_at < now() - make_interval(secs => $1) AND e.attempts < $2
@@ -254,7 +270,7 @@ export async function processInbox(d: PaymentDeps, olderThanSec = 30): Promise<{
       const out = await processInboxEvent(d, adapter, await credsFor(d, r.account_id), r.account_id, r.event_id);
       if (out.kind === 'processed') {
         processed++;
-        await logWebhook(d, r.account_id, 'POST', 'accepted', { eventId: r.event_id, reason: `Обработано повторно: ${out.result}` });
+        await logWebhook(d, r.account_id, 'POST', 'accepted', { eventId: r.event_id, providerRef: r.provider_ref, reason: `Обработано повторно: ${out.result}` });
       }
     } catch { /* ключи недоступны и т. п. — попробуем позже */ }
   }
