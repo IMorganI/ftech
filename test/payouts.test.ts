@@ -139,7 +139,7 @@ describe.skipIf(!url)('Выплаты', () => {
   it('нет ответа провайдера при возврате — не повторяем, создаём проблему для проверки', async () => {
     await paidDeposit(5000);
     const real = new MockAdapter(mock);
-    const broken: ProviderAdapter = { ...real, name: 'mock', createPayment: real.createPayment.bind(real), getStatus: real.getStatus.bind(real),
+    const broken: ProviderAdapter = { ...real, name: 'mock', createPayment: real.createPayment.bind(real), getPayment: real.getPayment.bind(real),
       verifyWebhook: real.verifyWebhook.bind(real), refund: async () => { throw new Error('ETIMEDOUT'); } };
     providers.register(broken);
     const r = (await payout(3000)).json();

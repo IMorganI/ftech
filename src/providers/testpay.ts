@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult, type ConnectionCheck,
-  type ProviderAdapter, type ProviderManifest, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
+  type ProviderAdapter, type ProviderManifest, type ProviderPayment, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
 } from './types.js';
 
 /*
@@ -171,14 +171,11 @@ export class TestPayAdapter implements ProviderAdapter {
     return { kind: 'redirect', providerRef: p.id, redirectUrl: `${this.sim.publicBaseUrl}/testpay/pay/${p.id}` };
   }
 
-  async getStatus(_creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
+  async getPayment(_creds: AccountCredentials, providerRef: string): Promise<ProviderPayment> {
     const p = this.sim.payments.get(providerRef);
     if (!p) throw new Error(`TestPay: платёж ${providerRef} не найден`);
-    return p.status;
-  }
-
-  async paidAmount(_creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
-    return this.sim.payments.get(providerRef)?.amount ?? null;
+    const paid = p.status === 'success';
+    return { status: p.status, amount: paid ? p.amount : null, currency: paid ? p.currency : null, operationId: paid ? `${p.id}_charge` : null };
   }
 
   readonly paymentTtlSec = 1800;

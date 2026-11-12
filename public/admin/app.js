@@ -777,7 +777,7 @@ async function viewManual(main) {
 async function viewIssues(main) {
   const all = !!state.cache.issuesAll;
   const rows = await api('GET', `/admin/v1/issues${all ? '?all=true' : ''}`);
-  const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером', amount_mismatch: 'Оплачена не та сумма', refund_unknown: 'Нет ответа провайдера при возврате' };
+  const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером', amount_mismatch: 'Оплачена не та сумма или валюта', unverified_payment: 'Оплата не подтверждена (нет суммы или валюты)', refund_unknown: 'Нет ответа провайдера при возврате' };
   put(main, h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Проблемы с платежами'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.issuesAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),

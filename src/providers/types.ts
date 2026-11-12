@@ -26,6 +26,20 @@ export type CreatePaymentResult =
 
 export type ProviderStatus = 'pending' | 'success' | 'declined';
 
+/**
+ * Что провайдер подтверждает о платеже. Для зачисления нужны ВСЕ поля: статус, сумма и валюта
+ * фактической оплаты. null — провайдер не сообщил: такой платёж не зачисляется, а уходит на ручную проверку.
+ */
+export interface ProviderPayment {
+  status: ProviderStatus;
+  /** Оплачено фактически, в минорных единицах. */
+  amount: bigint | null;
+  /** ISO 4217, например EUR. */
+  currency: string | null;
+  /** ID фактической платёжной операции у провайдера (не заказа), если есть. */
+  operationId?: string | null;
+}
+
 export interface RefundRequest {
   /** Наш ID платежа у провайдера (тот, что вернул createPayment). */
   providerRef: string;
@@ -109,8 +123,9 @@ export interface ProviderAdapter {
   /** Проверка ключей без создания платежей: что работает, что нет и почему. */
   checkConnection?(creds: AccountCredentials): Promise<ConnectionCheck[]>;
   createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult>;
-  /** Статус у провайдера. Используется и после вебхука: содержимому вебхука на слово не верим. */
-  getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus>;
+  /** Платёж у провайдера: статус, сумма и валюта фактической оплаты. Вызывается и после вебхука:
+   *  содержимому вебхука на слово не верим. */
+  getPayment(creds: AccountCredentials, providerRef: string): Promise<ProviderPayment>;
   /** Проверяет подлинность входящего вебхука (подпись или секретный токен в адресе) и достаёт из него ID.
    *  Не прошёл проверку — InvalidWebhookError. */
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string,
@@ -127,8 +142,6 @@ export interface ProviderAdapter {
   findPayment?(creds: AccountCredentials, reference: string): Promise<{ providerRef: string } | null>;
   /** Возврат (полный или частичный) по успешной оплате — основа выплат по closed loop. */
   refund?(creds: AccountCredentials, req: RefundRequest): Promise<RefundResult>;
-  /** Сколько фактически оплачено (в минорных единицах), если провайдер это сообщает. null — неизвестно. */
-  paidAmount?(creds: AccountCredentials, providerRef: string): Promise<bigint | null>;
   /** Если провайдер проверяет адрес вебхука GET-запросом (как Viva) — что ему ответить. */
   webhookChallenge?(creds: AccountCredentials, query: Record<string, unknown>): Promise<unknown>;
 }

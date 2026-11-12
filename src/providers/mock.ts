@@ -3,7 +3,7 @@ import { hmacHex, safeEqualHex } from '../crypto.js';
 import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
-  type ProviderAdapter, type ProviderManifest, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
+  type ProviderAdapter, type ProviderManifest, type ProviderPayment, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
 } from './types.js';
 
 /*
@@ -127,8 +127,10 @@ export class MockAdapter implements ProviderAdapter {
     return this.provider.create(creds, req);
   }
 
-  async getStatus(_creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
-    return this.provider.status(providerRef);
+  async getPayment(_creds: AccountCredentials, providerRef: string): Promise<ProviderPayment> {
+    const status = this.provider.status(providerRef);
+    const p = this.provider.payments.get(providerRef)!;
+    return { status, amount: status === 'success' ? p.amount : null, currency: status === 'success' ? p.currency : null, operationId: p.ref };
   }
 
   readonly paymentTtlSec = 1800;
@@ -142,9 +144,6 @@ export class MockAdapter implements ProviderAdapter {
     return this.provider.refund(req.providerRef, req.amount);
   }
 
-  async paidAmount(_creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
-    return this.provider.payments.get(providerRef)?.amount ?? null;
-  }
 
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string): VerifiedWebhook {
     const sig = String(headers[MOCK_SIGNATURE_HEADER] ?? '');

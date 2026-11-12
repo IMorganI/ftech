@@ -168,8 +168,7 @@ describe.skipIf(!url)('Ядро', () => {
       const flaky: ProviderAdapter = {
         name: 'mock', manifest: real.manifest,
         createPayment: (c, r) => real.createPayment(c, r),
-        getStatus: async (c, ref) => { if (statusDown) throw new Error('provider 503'); return real.getStatus(c, ref); },
-        paidAmount: (c, ref) => real.paidAmount(c, ref),
+        getPayment: async (c, ref) => { if (statusDown) throw new Error('provider 503'); return real.getPayment(c, ref); },
         verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
       };
       providers.register(flaky);
@@ -303,6 +302,50 @@ describe.skipIf(!url)('Ядро', () => {
       const [a] = await users();
       await expect(approveManualLeg(pool, leg, { userId: a })).rejects.toMatchObject({ code: 'approval_not_needed' });
       expect((await completeManualLeg(pool, leg, { userId: a }, { reference: 'SEPA-2', note: '' })).status).toBe('success');
+    });
+  });
+
+  // ---------- 6. зачисление только по подтверждённым сумме и валюте ----------
+
+  describe('зачисление только по подтверждённой оплате', () => {
+    let override: { amount?: bigint | null; currency?: string | null } = {};
+    beforeEach(() => {
+      override = {};
+      const real = new MockAdapter(mock);
+      providers.register({
+        name: 'mock', manifest: real.manifest,
+        createPayment: (c, r) => real.createPayment(c, r),
+        getPayment: async (c, ref) => ({ ...(await real.getPayment(c, ref)), ...override }),
+        verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
+      });
+    });
+    const issues = async () => (await pool.query(`SELECT kind, details FROM reconciliation_issues`)).rows;
+    const status = async (id: string) => (await pool.query(`SELECT status FROM transactions WHERE id = $1`, [id])).rows[0].status;
+    const ledger = async () => (await pool.query(`SELECT count(*)::int c FROM ledger_entries`)).rows[0].c;
+
+    for (const [name, o, kind] of [
+      ['провайдер не сообщил сумму', { amount: null }, 'unverified_payment'],
+      ['провайдер не сообщил валюту', { currency: null }, 'unverified_payment'],
+      ['оплачено в другой валюте', { currency: 'USD' }, 'amount_mismatch'],
+      ['оплачена другая сумма', { amount: 999n }, 'amount_mismatch'],
+    ] as const) {
+      it(`${name} — не зачисляется, уходит в «Проблемы»`, async () => {
+        await account();
+        const d = (await deposit(1000)).json();
+        override = o;
+        await mock.complete(d.paymentUrl.split('/').pop(), 'success');
+        expect(await status(d.id)).toBe('pending');
+        expect(await ledger()).toBe(0);
+        expect((await issues()).map((i) => i.kind)).toEqual([kind]);
+      });
+    }
+
+    it('всё подтверждено — зачисляется', async () => {
+      await account();
+      const d = (await deposit(1000)).json();
+      await mock.complete(d.paymentUrl.split('/').pop(), 'success');
+      expect(await status(d.id)).toBe('success');
+      expect(await issues()).toEqual([]);
     });
   });
 });

@@ -25,7 +25,8 @@ const money = (cents: bigint | string, cur?: string) => {
 const ISSUE_TEXT: Record<string, string> = {
   late_success: 'провайдер подтвердил оплату по попытке, которую мы уже закрыли',
   status_mismatch: 'статус у провайдера не совпадает с нашим',
-  amount_mismatch: 'оплачена не та сумма',
+  amount_mismatch: 'оплачена не та сумма или валюта',
+  unverified_payment: 'провайдер не подтвердил сумму или валюту оплаты',
   refund_unknown: 'нет ответа провайдера при возврате — проверь, ушли ли деньги',
 };
 

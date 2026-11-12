@@ -282,7 +282,7 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     const flaky: ProviderAdapter = { // как провайдер без поиска по нашему ID
       name: 'mock', manifest: real.manifest, paymentTtlSec: 1800,
       createPayment: async (c, r) => { if (c.accountId === failFor) throw new Error('ETIMEDOUT'); return real.createPayment(c, r); },
-      getStatus: (c, ref) => real.getStatus(c, ref),
+      getPayment: (c, ref) => real.getPayment(c, ref),
       verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
     };
     providers.register(flaky);
@@ -308,7 +308,7 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     const lossy: ProviderAdapter = { // провайдер создал заказ, а ответ до нас не дошёл
       ...Object.fromEntries(['name', 'manifest', 'paymentTtlSec'].map((k) => [k, (real as unknown as Record<string, unknown>)[k]])) as Pick<ProviderAdapter, 'name' | 'manifest'>,
       createPayment: async (c, r) => { const res = await real.createPayment(c, r); if (c.accountId === accA) throw new Error('socket hang up'); return res; },
-      getStatus: (c, ref) => real.getStatus(c, ref),
+      getPayment: (c, ref) => real.getPayment(c, ref),
       verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
       findPayment: (c, ref) => real.findPayment(c, ref),
     };
@@ -335,7 +335,7 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     const flaky: ProviderAdapter = {
       name: 'mock', manifest: real.manifest,
       createPayment: async (c, r) => { if (c.accountId === failFor) throw new Error('ETIMEDOUT'); return real.createPayment(c, r); },
-      getStatus: (c, ref) => real.getStatus(c, ref),
+      getPayment: (c, ref) => real.getPayment(c, ref),
       verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
       findPayment: async () => null,
     };

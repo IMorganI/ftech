@@ -268,22 +268,29 @@ async function applyProviderStatus(
   )).rows[0];
   if (!attempt) return 'unknown_payment';
 
-  const status = await adapter.getStatus(creds, providerRef);
+  const pay = await adapter.getPayment(creds, providerRef);
+  const status = pay.status;
   if (status === 'pending') return 'still_pending';
 
-  if (attempt.status === 'pending' && status === 'success' && adapter.paidAmount) {
-    // Сверка суммы: зачисляем, только если оплачено ровно столько, сколько мы просили.
-    const paid = await adapter.paidAmount(creds, providerRef);
-    if (paid !== null && paid !== attempt.amount) {
-      await d.pool.query(`UPDATE transaction_attempts SET error = $2 WHERE id = $1`,
-        [attempt.id, `amount_mismatch: ожидали ${attempt.amount}, оплачено ${paid}`]);
+  if (attempt.status === 'pending' && status === 'success') {
+    const expectCur = attempt.currency.trim();
+    const issue = async (kind: string, error: string, details: string) => {
+      await d.pool.query(`UPDATE transaction_attempts SET error = $2 WHERE id = $1`, [attempt.id, error]);
       await d.pool.query(
         `INSERT INTO reconciliation_issues (transaction_id, attempt_id, kind, details)
-         SELECT $1, $2, 'amount_mismatch', $3
-         WHERE NOT EXISTS (SELECT 1 FROM reconciliation_issues WHERE attempt_id = $2 AND kind = 'amount_mismatch')`,
-        [attempt.transaction_id, attempt.id,
-         `Ожидали ${formatCents(attempt.amount)} ${attempt.currency.trim()}, у провайдера оплачено ${formatCents(paid)} (ref ${providerRef}). Платёж не зачислен.`]);
-      return 'issue_recorded';
+         SELECT $1, $2, $3, $4
+         WHERE NOT EXISTS (SELECT 1 FROM reconciliation_issues WHERE attempt_id = $2 AND kind = $3)`,
+        [attempt.transaction_id, attempt.id, kind, details]);
+      return 'issue_recorded' as const;
+    };
+    // Зачисляем, только если провайдер подтвердил и сумму, и валюту фактической оплаты.
+    if (pay.amount === null || pay.currency === null) {
+      return issue('unverified_payment', `unverified: провайдер не сообщил ${pay.amount === null ? 'сумму' : 'валюту'} оплаты`,
+        `Провайдер говорит «оплачено», но не сообщил ${pay.amount === null ? 'сумму' : 'валюту'} оплаты (ref ${providerRef}). Платёж не зачислен — проверь оплату в кабинете провайдера.`);
+    }
+    if (pay.amount !== attempt.amount || pay.currency !== expectCur) {
+      return issue('amount_mismatch', `amount_mismatch: ожидали ${attempt.amount} ${expectCur}, оплачено ${pay.amount} ${pay.currency}`,
+        `Ожидали ${formatCents(attempt.amount)} ${expectCur}, у провайдера оплачено ${formatCents(pay.amount)} ${pay.currency} (ref ${providerRef}). Платёж не зачислен.`);
     }
   }
 
