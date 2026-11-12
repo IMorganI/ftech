@@ -109,12 +109,12 @@ type WebhookOutcome = 'accepted' | 'test' | 'duplicate' | 'rejected' | 'error' |
 
 /** Журнал входящих вебхуков: что пришло и что мы с этим сделали. Ошибка записи не мешает обработке. */
 async function logWebhook(d: PaymentDeps, accountId: string, method: string, outcome: WebhookOutcome,
-  extra: { reason?: string; eventId?: string; providerRef?: string; ip?: string } = {}): Promise<void> {
+  extra: { reason?: string; eventId?: string; providerRef?: string; ip?: string; at?: Date } = {}): Promise<void> {
   await d.pool.query(
-    `INSERT INTO provider_webhook_log (merchant_account_id, method, outcome, reason, event_id, provider_ref, ip)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    `INSERT INTO provider_webhook_log (merchant_account_id, method, outcome, reason, event_id, provider_ref, ip, received_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, coalesce($8, now()))`,
     [accountId, method, outcome, extra.reason?.slice(0, 300) ?? null, extra.eventId?.slice(0, 200) ?? null,
-     extra.providerRef?.slice(0, 200) ?? null, extra.ip ?? null]).catch(() => {});
+     extra.providerRef?.slice(0, 200) ?? null, extra.ip ?? null, extra.at ?? null]).catch(() => {});
 }
 
 interface WebhookAccount { id: string; adapter: string; adapterImpl: ProviderAdapter }
@@ -164,6 +164,7 @@ export async function handleProviderWebhook(
   d: PaymentDeps, accountId: string, headers: Record<string, string | string[] | undefined>, rawBody: string,
   query: Record<string, unknown> = {}, ip?: string,
 ): Promise<WebhookResult> {
+  const receivedAt = new Date(); // время прихода, а не окончания обработки — для истории платежа
   const acc = await webhookAccount(d, accountId, 'POST', query, ip);
   const adapter = acc.adapterImpl;
   let creds: AccountCredentials;
@@ -185,7 +186,7 @@ export async function handleProviderWebhook(
     `INSERT INTO provider_webhook_events (merchant_account_id, event_id, provider_ref, body)
      VALUES ($1, $2, $3, $4) ON CONFLICT (merchant_account_id, event_id) DO NOTHING`,
     [acc.id, hook.eventId, hook.providerRef, rawBody]);
-  const meta = { eventId: hook.eventId, providerRef: hook.providerRef, ip };
+  const meta = { eventId: hook.eventId, providerRef: hook.providerRef, ip, at: receivedAt };
   const r = await processInboxEvent(d, adapter, creds, acc.id, hook.eventId);
   if (r.kind === 'done-before') {
     await logWebhook(d, acc.id, 'POST', 'duplicate', { ...meta, reason: 'Повтор уже обработанного события' });

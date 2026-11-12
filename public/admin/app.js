@@ -67,6 +67,7 @@ const pill = (status) => { const [c, t] = STATUS[status] || ['m', status]; retur
 const DECLINE = {
   player_self_excluded: 'самоисключение', country_not_licensed: 'страна вне лицензии', kyc_rejected: 'KYC отклонён',
   kyc_required: 'нужен KYC', player_limit_exceeded: 'лимит игрока', no_route: 'нет маршрута', all_attempts_failed: 'отказ провайдеров',
+  provider_unavailable: 'провайдер не ответил (без каскада)', amount_over_limit: 'больше лимита выплаты',
 };
 
 function errorBox(err) {
@@ -188,6 +189,7 @@ const MENU = [
     ['sandbox', 'Тест-платёж', 'viewer', 'Проверить маршрутизацию и оплату без сайта'],
   ]],
   ['Контроль', [
+    ['stuck', 'Зависшие деньги', 'viewer', 'Где и сколько денег ждёт, как давно и что делать'],
     ['issues', 'Проблемы', 'viewer', 'Расхождения с провайдерами, которые разбирает человек'],
     ['audit', 'Журнал действий', 'admin', 'Кто, что и когда менял в борде'],
   ]],
@@ -215,8 +217,10 @@ function go(id) { state.tab = id; location.hash = id; document.body.classList.re
 /** Счётчики в меню: ручные выплаты и открытые проблемы. */
 async function refreshBadges() {
   try {
-    const o = await api('GET', '/admin/v1/overview');
-    state.badges = { manual: o.manual_payouts ?? 0, issues: o.open_issues ?? 0 };
+    const [o, st] = await Promise.all([api('GET', '/admin/v1/overview'), api('GET', '/admin/v1/stuck').catch(() => null)]);
+    // Зависшие: только то, что требует действия или внимания (без «ждут оплаты игроком»).
+    const stuck = st ? st.categories.filter((c) => c.severity === 'bad').reduce((a, c) => a + c.count, 0) : 0;
+    state.badges = { manual: o.manual_payouts ?? 0, issues: o.open_issues ?? 0, stuck };
     for (const [id, n] of Object.entries(state.badges)) {
       const b = document.querySelector(`[data-badge="${id}"]`);
       if (b) { b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; }
@@ -235,7 +239,7 @@ function renderShell() {
         visible.map(([id, label]) => h('button', {
           class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => go(id),
         }, h('span', null, label),
-          ['manual', 'issues'].includes(id) ? h('span', { class: `badge ${id === 'issues' ? 'bad' : 'warn'}`, 'data-badge': id, hidden: !badges[id] }, String(badges[id] ?? 0)) : null)));
+          ['manual', 'issues', 'stuck'].includes(id) ? h('span', { class: `badge ${id === 'manual' ? 'warn' : 'bad'}`, 'data-badge': id, hidden: !badges[id] }, String(badges[id] ?? 0)) : null)));
     }));
   const [, title, , subtitle] = TABS.find(([id]) => id === state.tab) || TABS[0];
   const group = MENU.find(([, items]) => items.some(([id]) => id === state.tab))?.[0] ?? '';
@@ -266,7 +270,7 @@ function renderShell() {
   };
   run();
   // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
-  if (['overview', 'payments', 'manual', 'accounts', 'issues'].includes(state.tab)) {
+  if (['overview', 'payments', 'manual', 'accounts', 'issues', 'stuck'].includes(state.tab)) {
     state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
   }
 }
@@ -630,42 +634,92 @@ async function viewPayments(main) {
       h('td', { class: 'dim' }, t.account || '—'), h('td', { class: 'n' }, t.attempts)))
       : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
 
-  put(main, h('div', { class: 'grid2' },
+  put(main, h('div', { class: 'grid2 pay' },
     h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter),
-      h('p', { class: 'note' }, 'Нажми на платёж, чтобы увидеть, через какие аккаунты он шёл и почему.'), h('div', { class: 'tbl' }, table)),
+      h('p', { class: 'note' }, 'Нажми на платёж — справа его история: аккаунты, ответы провайдера, вебхуки, проводки и что делать дальше.'), h('div', { class: 'tbl' }, table)),
     h('section', { class: 'panel' }, detail)));
   if (state.cache.selTx) await showTx(detail, state.cache.selTx);
-  else detail.append(h('p', { class: 'note' }, 'Выбери платёж слева: здесь будет его путь по аккаунтам, проводки и вебхуки.'));
+  else detail.append(h('p', { class: 'note' }, 'Выбери платёж слева: здесь будет его полная история и что можно сделать сейчас.'));
 }
 
+const TONE_PILL = { ok: 'ok', bad: 'bad', warn: 'warn', info: 'n' };
+const WHO = { system: 'система', staff: 'сотрудник', site: 'сайт' };
+
+function openTx(id) { state.cache.selTx = id; go('payments'); }
+
 async function showTx(box, id) {
-  const t = await api('GET', `/admin/v1/transactions/${id}`);
-  put(box, 
-    h('div', { class: 'row' }, h('h3', null, money(t.amount, t.currency)), pill(t.status)),
+  let t;
+  try { t = await api('GET', `/admin/v1/transactions/${id}/timeline`); }
+  catch (err) { if (!handleAuthError(err)) put(box, errorBox(err)); return; }
+  const day = (iso) => new Date(iso).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+  const time = (iso) => new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  let lastDay = '';
+  put(box,
+    h('div', { class: 'row' },
+      h('div', null, h('div', { class: 'note' }, t.type === 'payout' ? 'Выплата' : 'Депозит'),
+        h('h3', { class: 'tx-amount' }, t.type === 'payout' ? '−' : '', money(t.amount, t.currency))),
+      pill(t.status)),
+    h('div', { class: `tx-state ${t.state.tone}` }, h('b', null, t.state.title), t.state.detail ? h('div', null, t.state.detail) : null),
+    t.next.length ? h('div', { class: 'tx-next' }, h('h2', null, 'Что дальше'),
+      h('ul', { class: 'plain' }, t.next.map((n) => h('li', null,
+        h('span', { class: `who ${n.who}` }, WHO[n.who]), ' ', n.text,
+        n.tab ? [' ', h('button', { class: 'link', onclick: () => go(n.tab) }, 'Открыть →')] : null)))) : null,
     h('div', { class: 'meta' },
-      h('span', null, 'ID'), h('span', null, t.id), h('span', null, 'Сайт'), h('span', null, t.site),
-      h('span', null, 'Игрок'), h('span', null, `${t.player} · ${t.country}`), h('span', null, 'Создан'), h('span', null, when(t.created_at)),
-      t.decline_code ? [h('span', null, 'Причина отказа'), h('span', null, DECLINE[t.decline_code] || t.decline_code)] : null),
-    ...(t.type === 'payout' ? [
-      h('h2', null, 'Части выплаты'),
-      t.legs.length ? h('ol', { class: 'steps' }, t.legs.map((l) => h('li', null,
-        h('div', null, h('b', null, l.kind === 'refund' ? `Возврат на карту · ${l.account || ''}` : 'Ручная выплата'), ' ', money(l.amount, t.currency), ' ', pill(l.status)),
-        l.error ? h('div', { class: 'reason' }, l.error) : null,
-        l.note ? h('div', { class: 'reason' }, l.note, l.completed_by ? ` — ${l.completed_by}` : '') : null)))
-        : h('p', { class: 'note' }, 'Выплата отклонена до раскладки.'),
-    ] : [
-    h('h2', null, 'Попытки'),
-    t.attempts.length ? h('ol', { class: 'steps' }, t.attempts.map((a) => h('li', null,
-      h('div', null, h('b', null, a.account), ' ', pill(a.status), a.error ? h('span', { class: 'note' }, ` · ${a.error}`) : null),
-      h('div', { class: 'reason' }, a.route_reason)))) : h('p', { class: 'note' }, 'Платёж отклонён до выбора аккаунта.')]),
-    h('h2', null, 'Проводки'),
-    t.ledger.length ? h('table', null, h('tbody', null, t.ledger.map((l) => h('tr', null, h('td', { class: 'dim' }, l.account), h('td', { class: 'n' }, money(l.amount, l.currency))))))
-      : h('p', { class: 'note' }, 'Проводок нет: деньги ещё не поступили.'),
-    h('h2', null, 'Вебхуки сайту'),
-    t.webhooks.length ? h('table', null, h('tbody', null, t.webhooks.map((w) => h('tr', null,
-      h('td', null, w.event), h('td', null, h('span', { class: `pill ${w.status === 'delivered' ? 'ok' : w.status === 'failed' ? 'bad' : 'n'}` }, w.status)),
-      h('td', { class: 'dim' }, w.last_error || `попыток: ${w.attempts}`)))))
-      : h('p', { class: 'note' }, 'Вебхуков нет (у сайта не задан адрес или статус ещё не менялся).'));
+      h('span', null, 'ID'), h('span', { class: 'id-cell' }, t.id),
+      h('span', null, 'Сайт'), h('span', null, `${t.site} · ${t.operator}`),
+      h('span', null, 'Игрок'), h('span', null, `${t.player} · ${t.country}`),
+      t.withdrawalId ? [h('span', null, 'Вывод казино'), h('span', null, t.withdrawalId)] : null,
+      t.platformFee !== null && t.platformFee !== undefined ? [h('span', null, 'Заработок платформы'), h('span', null, money(t.platformFee, t.currency))] : null,
+      t.type === 'deposit' && BigInt(t.refunded || 0) > 0n ? [h('span', null, 'Возвращено игроку'), h('span', null, money(t.refunded, t.currency))] : null),
+    h('h2', null, 'История'),
+    h('ol', { class: 'timeline' }, t.events.map((e) => {
+      const d = day(e.at); const showDay = d !== lastDay; lastDay = d;
+      return h('li', { class: `tl ${e.tone}` },
+        h('span', { class: 'tl-time' }, showDay ? h('span', { class: 'tl-day' }, d) : null, time(e.at)),
+        h('span', { class: 'tl-dot', 'aria-hidden': 'true' }),
+        h('div', { class: 'tl-body' }, h('div', { class: 'tl-title' }, e.title, e.actor ? h('span', { class: 'tl-actor' }, ` · ${e.actor}`) : null),
+          e.detail ? h('div', { class: 'tl-detail' }, e.detail) : null));
+    })));
+}
+
+// ---------- зависшие деньги ----------
+
+const SEV = { bad: ['нужно действие', 'bad'], warn: ['внимание', 'warn'], info: ['для сведения', 'm'] };
+const ageText = (iso) => {
+  const m = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  return m < 60 ? `${m} мин` : m < 2880 ? `${Math.round(m / 60)} ч` : `${Math.round(m / 1440)} дн`;
+};
+
+async function viewStuck(main) {
+  const s = await api('GET', '/admin/v1/stuck');
+  const active = s.categories.filter((c) => c.count > 0);
+  const quiet = s.categories.filter((c) => c.count === 0);
+  const sum = (sev) => active.filter((c) => c.severity === sev).reduce((a, c) => a + c.count, 0);
+  const totals = (list) => list.map((t) => money(t.amount, t.currency)).join(' · ') || '—';
+
+  put(main,
+    h('div', { class: 'kpis' },
+      h('div', { class: `kpi ${sum('bad') ? 'alarm' : ''}` }, h('span', { class: 'kpi-label' }, 'Нужно действие'), h('b', { class: 'kpi-value' }, String(sum('bad'))),
+        h('span', { class: 'kpi-sub' }, sum('bad') ? 'платежей, где без человека не разобраться' : 'ничего не требует вмешательства')),
+      h('div', { class: 'kpi' }, h('span', { class: 'kpi-label' }, 'Внимание'), h('b', { class: 'kpi-value' }, String(sum('warn'))),
+        h('span', { class: 'kpi-sub' }, 'ручные выплаты, повторы, доставка')),
+      h('div', { class: 'kpi' }, h('span', { class: 'kpi-label' }, 'Зарезервировано лимита'), h('b', { class: 'kpi-value' }, ...(s.reserved.length ? s.reserved.map((r) => h('span', null, money(r.amount, r.currency))) : ['0'])),
+        h('span', { class: 'kpi-sub' }, 'под платежи, которые ещё не завершились'))),
+    active.length ? active.map((c) => h('section', { class: `panel stuck ${c.severity}` },
+      h('div', { class: 'row' },
+        h('div', null, h('h3', null, c.title, ' ', h('span', { class: `pill ${SEV[c.severity][1]}` }, SEV[c.severity][0])),
+          h('div', { class: 'note' }, `${c.count} · ${totals(c.totals)} · старейшему ${ageText(c.oldestAt)}`)),
+        c.tab ? h('button', { class: 'sm', onclick: () => go(c.tab) }, 'Раздел →') : null),
+      h('p', { class: 'note' }, c.hint),
+      h('div', { class: 'tbl' }, h('table', null,
+        h('thead', null, h('tr', null, ['Сколько ждёт', 'Сумма', 'Подробности', ''].map((x) => h('th', null, x)))),
+        h('tbody', null, c.items.map((i) => h('tr', { class: 'click', tabindex: 0, onclick: () => openTx(i.txId), onkeydown: (e) => { if (e.key === 'Enter') openTx(i.txId); } },
+          h('td', { class: 'n' }, ageText(i.at)), h('td', { class: 'n' }, money(i.amount, i.currency)),
+          h('td', { class: 'dim' }, i.label), h('td', null, h('span', { class: 'link-like' }, 'История →'))))))),
+      c.count > c.items.length ? h('p', { class: 'note' }, `Показаны первые ${c.items.length} из ${c.count}.`) : null))
+      : h('section', { class: 'panel hint' }, h('h3', null, 'Всё чисто'), h('p', null, 'Нет денег, которые зависли или ждут человека.')),
+    quiet.length ? h('section', { class: 'panel' }, h('h2', null, 'Без замечаний'),
+      h('ul', { class: 'plain note' }, quiet.map((c) => h('li', null, `✓ ${c.title}`)))) : null);
 }
 
 // ---------- песочница ----------
@@ -716,6 +770,7 @@ function viewSandbox(main) {
       field('Сумма', h('input', { name: 'amount', required: true, value: '10.00', inputmode: 'decimal' })),
       field('Валюта', h('input', { name: 'currency', required: true, value: 'EUR', maxlength: 3 })),
       field('ID игрока', h('input', { name: 'player', required: true, value: 'demo-player-1' })),
+      field('ID вывода в казино', h('input', { name: 'withdrawal', required: true, value: `W-${Date.now().toString(36).toUpperCase()}` })),
       h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать выплату')),
     ], async (v) => {
       if (!sb.key) throw new Error('Сначала вставь API-ключ сайта в форму депозита выше');
@@ -723,7 +778,7 @@ function viewSandbox(main) {
       if (!amount) throw new Error('Сумма — число больше нуля');
       const res = await fetch('/v1/payouts', { method: 'POST', headers: {
         'content-type': 'application/json', authorization: `Bearer ${sb.key}`, 'idempotency-key': `sandbox-${crypto.randomUUID()}` },
-        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), player: { id: v.player.trim() } }) });
+        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), withdrawalId: v.withdrawal.trim(), player: { id: v.player.trim() } }) });
       const data = await res.json().catch(() => null);
       if (!res.ok) { const e = new Error(data?.error?.message || `Ошибка ${res.status}`); e.details = data?.error?.details; throw e; }
       return h('div', { class: `msg ${data.status === 'declined' ? 'err' : 'ok'}` },
@@ -1175,7 +1230,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, analytics: viewAnalytics, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, analytics: viewAnalytics, stuck: viewStuck, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);
