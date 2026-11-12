@@ -30,7 +30,7 @@ function fakeViva() {
       return respond(200, { access_token: `tok${tokenIssued}`, expires_in: 3600, token_type: 'Bearer' });
     }
     if (url === 'https://demo-api.vivapayments.com/checkout/v2/orders') {
-      if (state.failCreateWith) return respond(state.failCreateWith, { message: 'error' });
+      if (state.failCreateWith) return respond(state.failCreateWith, state.failCreateWith === 403 ? '' : { message: 'error' }); // настоящая Viva на 403 отвечает пустым телом
       if (!init.headers.authorization?.startsWith('Bearer tok')) return respond(401, {});
       const code = (next++).toString();
       orders.set(code, 0);
@@ -84,7 +84,9 @@ describe('Viva: адаптер', () => {
     const v = fakeViva();
     const a = new VivaAdapter({ fetch: v.fetch });
     v.state.failCreateWith = 400;
-    expect(await a.createPayment(creds, req())).toEqual({ kind: 'declined', reason: 'viva_http_400' });
+    expect(await a.createPayment(creds, req())).toEqual({ kind: 'declined', reason: 'viva_http_400: error' });
+    v.state.failCreateWith = 403;
+    expect(await a.createPayment(creds, req())).toMatchObject({ reason: expect.stringMatching(/^viva_http_403: .*Smart Checkout/) });
     v.state.failCreateWith = 503;
     await expect(a.createPayment(creds, req())).rejects.toThrow(/503/);
   });

@@ -113,6 +113,8 @@ export async function providerWebhookChallenge(d: PaymentDeps, accountId: string
   return adapter.webhookChallenge(await credsFor(d, acc.id, acc.credentials_ref), query);
 }
 
+const formatCents = (c: bigint) => `${c / 100n}.${(c % 100n).toString().padStart(2, '0')}`;
+
 export type WebhookResult = 'processed' | 'duplicate' | 'unknown_payment' | 'still_pending' | 'issue_recorded';
 
 /**
@@ -155,6 +157,22 @@ async function applyProviderStatus(
   const status = await adapter.getStatus(creds, providerRef);
   if (status === 'pending') return 'still_pending';
 
+  if (attempt.status === 'pending' && status === 'success' && adapter.paidAmount) {
+    // Сверка суммы: зачисляем, только если оплачено ровно столько, сколько мы просили.
+    const paid = await adapter.paidAmount(creds, providerRef);
+    if (paid !== null && paid !== attempt.amount) {
+      await d.pool.query(`UPDATE transaction_attempts SET error = $2 WHERE id = $1`,
+        [attempt.id, `amount_mismatch: ожидали ${attempt.amount}, оплачено ${paid}`]);
+      await d.pool.query(
+        `INSERT INTO reconciliation_issues (transaction_id, attempt_id, kind, details)
+         SELECT $1, $2, 'amount_mismatch', $3
+         WHERE NOT EXISTS (SELECT 1 FROM reconciliation_issues WHERE attempt_id = $2 AND kind = 'amount_mismatch')`,
+        [attempt.transaction_id, attempt.id,
+         `Ожидали ${formatCents(attempt.amount)} ${attempt.currency.trim()}, у провайдера оплачено ${formatCents(paid)} (ref ${providerRef}). Платёж не зачислен.`]);
+      return 'issue_recorded';
+    }
+  }
+
   if (attempt.status === 'pending') {
     const tx = await resolveAttempt(d.pool, attempt.transaction_id, { status, attemptId: attempt.id, providerRef });
     if (tx.status === 'pending') await submitPending(d, tx.id); // каскад: отправляем следующую попытку
@@ -181,6 +199,7 @@ export async function reconcilePending(d: PaymentDeps, olderThanSec = 300): Prom
   const rows = (await d.pool.query<AttemptRow & { error: string | null; submitted_at: Date | null }>(
     `${ATTEMPT_SELECT.replace('SELECT a.id,', 'SELECT a.error, a.submitted_at, a.id,')}
      WHERE a.status = 'pending' AND coalesce(a.submitted_at, a.created_at) < now() - make_interval(secs => $1)
+       AND (a.error IS NULL OR a.error NOT LIKE 'amount_mismatch%') -- такие разбирает человек
      ORDER BY a.created_at LIMIT 100`, [olderThanSec],
   )).rows;
   let resolved = 0;

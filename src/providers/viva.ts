@@ -64,6 +64,20 @@ function extractNumber(text: string, key: string): string | null {
   return m ? m[1]! : null;
 }
 
+/** Понятная причина отказа Viva для борды: их сообщение или подсказка по коду. */
+export function vivaErrorText(status: number, body: string): string {
+  let msg = '';
+  try {
+    const j = JSON.parse(body) as { message?: unknown; Message?: unknown; errorText?: unknown; ErrorText?: unknown };
+    msg = String(j.message ?? j.Message ?? j.errorText ?? j.ErrorText ?? '');
+  } catch { /* не JSON */ }
+  if (msg && msg !== 'null') return msg.replace(/\s+/g, ' ').slice(0, 200);
+  if (status === 403) return 'нет прав на создание заказа — проверь, что ключи из блока Smart Checkout Credentials';
+  if (status === 404) return 'не найдено — проверь env (demo/live) и код источника платежей';
+  if (status === 400) return 'Viva отклонила параметры заказа (сумма, валюта или код источника)';
+  return 'Viva вернула ошибку без пояснения';
+}
+
 export class VivaAdapter implements ProviderAdapter {
   readonly name = 'viva';
   private tokens = new Map<string, { token: string; expiresAt: number }>();
@@ -115,7 +129,7 @@ export class VivaAdapter implements ProviderAdapter {
     if (res.status === 401) this.tokens.delete(`${c.env}:${c.clientId}`);
     // 4xx — Viva явно отказала (неверные данные, источник не настроен): это отказ, каскад пойдёт дальше.
     if (res.status >= 400 && res.status < 500 && res.status !== 401 && res.status !== 429) {
-      return { kind: 'declined', reason: `viva_http_${res.status}` };
+      return { kind: 'declined', reason: `viva_http_${res.status}: ${vivaErrorText(res.status, text)}` };
     }
     // 5xx, 401, 429, сеть — не знаем, создан ли заказ: исключение, попытку разберёт сверка.
     if (!res.ok) throw new VivaError(`Viva create order: HTTP ${res.status}`, res.status);

@@ -5,13 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 set -a; . ./.env; set +a
 
-if curl -fs "localhost:${PORT:-3000}/health" >/dev/null 2>&1; then
+# Отвечает и процесс жив (не в процессе остановки) — второй не запускаем.
+if pgrep -f "tsx src/index.ts" >/dev/null && curl -fs --max-time 2 "localhost:${PORT:-3000}/health" >/dev/null 2>&1; then
   echo "Сервер уже работает: ${PUBLIC_BASE_URL}/admin"
   exit 0
 fi
 
 npm run -s migrate
-echo "Борда: ${PUBLIC_BASE_URL}/admin  (порт 3000 во вкладке Ports; не закрывай этот терминал)"
+echo "Борда: ${PUBLIC_BASE_URL}/admin  (порт 3000 во вкладке Ports; не закрывай этот терминал — или используй npm run up)"
 if [ "${1:-}" = "--foreground" ]; then
   exec npx tsx src/index.ts
 fi

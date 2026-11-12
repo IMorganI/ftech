@@ -79,6 +79,8 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
   }
 
   if (pool && deps.admin) {
+    // Корень сайта ведёт в борду: удобно открывать адрес без /admin.
+    app.get('/', async (_req, reply) => reply.redirect('/admin', 302));
     app.register(adminPlugin, { pool, ...deps.admin });
     app.register(boardRoutes);
   }

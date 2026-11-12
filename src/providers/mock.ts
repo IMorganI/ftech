@@ -107,6 +107,10 @@ export class MockAdapter implements ProviderAdapter {
     return this.provider.status(providerRef);
   }
 
+  async paidAmount(_creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
+    return this.provider.payments.get(providerRef)?.amount ?? null;
+  }
+
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string): VerifiedWebhook {
     const sig = String(headers[MOCK_SIGNATURE_HEADER] ?? '');
     const ts = Number(headers[MOCK_TIMESTAMP_HEADER]);

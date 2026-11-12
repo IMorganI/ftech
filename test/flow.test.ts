@@ -243,6 +243,24 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     expect((await tx(d.id)).status).toBe('pending'); // деньги автоматически не двигаем
   });
 
+  it('оплачена не та сумма — платёж не зачисляется, создаётся проблема, сверка его больше не трогает', async () => {
+    await account('A', 100);
+    const d = await deposit(5000);
+    const ref = refOf(d.paymentUrl);
+    mock.payments.get(ref)!.amount = 500n; // у провайдера «оплатили» 5.00 вместо 50.00
+    await mock.complete(ref, 'success');
+    expect((await tx(d.id)).status).toBe('pending');
+    expect(await ledgerCount()).toBe(0);
+    const issues = (await pool.query(`SELECT kind, details FROM reconciliation_issues`)).rows;
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ kind: 'amount_mismatch' });
+    expect(issues[0].details).toMatch(/50\.00 EUR.*5\.00/);
+    await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '10 minutes'`);
+    expect((await reconcilePending({ pool, providers, secrets }, 60)).checked).toBe(0);
+    await mock.sendWebhook(mock.payments.get(ref)!); // повторный вебхук не плодит проблемы
+    expect((await pool.query(`SELECT count(*)::int c FROM reconciliation_issues`)).rows[0].c).toBe(1);
+  });
+
   // ---------- сверка ----------
 
   it('потерянный вебхук: сверка сама узнаёт статус у провайдера', async () => {
