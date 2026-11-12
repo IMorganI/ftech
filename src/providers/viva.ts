@@ -3,7 +3,7 @@ import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
   type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
-  type CredentialField, type ConnectionCheck, type ProviderManifest,
+  type CredentialField, type ConnectionCheck, type ProviderManifest, type ProviderPayment,
 } from './types.js';
 
 /*
@@ -47,7 +47,9 @@ export type HttpFetch = (url: string, init: { method: string; headers: Record<st
 interface VivaTransaction {
   TransactionId: string;
   StatusId: string;
-  Amount: number;
+  Amount: number | string;
+  /** Числовой код ISO 4217 строкой ("978") */
+  CurrencyCode?: string | number;
   TransactionType?: { TransactionTypeId: number; Name?: string };
 }
 
@@ -63,6 +65,24 @@ export function parseVivaCredentials(secret: string): VivaCredentials {
   if (c.env !== 'demo' && c.env !== 'live') throw new Error('В секрете Viva поле env должно быть "demo" или "live"');
   if (c.webhookToken !== undefined && c.webhookToken.length < 24) throw new Error('webhookToken в секрете Viva — минимум 24 символа');
   return c as VivaCredentials;
+}
+
+/** Сумма Viva в единицах валюты (10.5 → 1050 центов). Строкой, без float. */
+export function parseDecimalAmount(v: string): bigint | null {
+  const m = /^(\d{1,15})(?:\.(\d{1,2})\d*)?$/.exec(v.trim());
+  return m ? BigInt(m[1]!) * 100n + BigInt((m[2] ?? '').padEnd(2, '0')) : null;
+}
+
+/** Viva отдаёт валюту числовым кодом ISO 4217 (978 = EUR). Неизвестный код — null (платёж уйдёт на проверку). */
+const ISO_NUMERIC: Record<string, string> = {
+  '978': 'EUR', '840': 'USD', '826': 'GBP', '985': 'PLN', '946': 'RON', '203': 'CZK', '348': 'HUF', '752': 'SEK',
+  '208': 'DKK', '578': 'NOK', '975': 'BGN', '756': 'CHF', '980': 'UAH',
+};
+export function currencyFromViva(code: unknown): string | null {
+  if (typeof code === 'number') code = String(code);
+  if (typeof code !== 'string') return null;
+  if (/^[A-Z]{3}$/.test(code)) return code;
+  return ISO_NUMERIC[code.padStart(3, '0')] ?? null;
 }
 
 /** RequestAmount Viva — десятичное число в единицах валюты (5.00 = 500 центов). Разбираем строкой, без float. */
@@ -105,8 +125,12 @@ const VIVA_FIELDS: CredentialField[] = [
   { key: 'currency', label: 'Валюта аккаунта', default: 'EUR', required: true },
 ];
 
+/** Срок оплаты заказа Viva, секунды. Задаём явно: от него зависит, когда можно закрыть потерянную отправку. */
+export const VIVA_PAYMENT_TTL_SEC = 1800;
+
 export class VivaAdapter implements ProviderAdapter {
   readonly name = 'viva';
+  readonly paymentTtlSec = VIVA_PAYMENT_TTL_SEC;
   readonly manifest: ProviderManifest = {
     title: 'Viva Wallet (Smart Checkout)',
     summary: 'Европейский эквайер: игрок платит на странице Viva, карты к нам не попадают.',
@@ -203,6 +227,7 @@ export class VivaAdapter implements ProviderAdapter {
       amount: Number(req.amount),            // в минорных единицах (центах), как и у нас
       customerTrns: 'Пополнение счёта',
       merchantTrns: req.reference,           // наш ID попытки — вернётся в вебхуке и отчётах Viva
+      paymentTimeout: VIVA_PAYMENT_TTL_SEC,   // явный срок оплаты заказа: после него оплатить нельзя
     };
     if (c.sourceCode) body.sourceCode = c.sourceCode;
 
@@ -237,18 +262,36 @@ export class VivaAdapter implements ProviderAdapter {
     return { state, amount: parseVivaAmount(text) };
   }
 
-  async getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
+  /**
+   * Статус заказа (GET /api/orders) и, для оплаченного, фактическая оплата: платёжная транзакция заказа
+   * (CardCharge, статус F) из GET /api/transactions — её сумма, валюта и ID.
+   */
+  async getPayment(creds: AccountCredentials, providerRef: string): Promise<ProviderPayment> {
     const { state } = await this.order(creds, providerRef);
     switch (state) {
-      case 3: return 'success';
-      case 1: case 2: return 'declined';
-      case 0: return 'pending';
+      case 0: return { status: 'pending', amount: null, currency: null };
+      case 1: case 2: return { status: 'declined', amount: null, currency: null };
+      case 3: break;
       default: throw new VivaError(`Viva order status: неизвестный StateId (${state})`);
     }
+    const charge = await this.charge(parseVivaCredentials(creds.secret), providerRef);
+    if (!charge) return { status: 'success', amount: null, currency: null };
+    return {
+      status: 'success',
+      amount: typeof charge.Amount === 'number' || typeof charge.Amount === 'string' ? parseDecimalAmount(String(charge.Amount)) : null,
+      currency: currencyFromViva(charge.CurrencyCode),
+      operationId: charge.TransactionId ?? null,
+    };
   }
 
-  async paidAmount(creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
-    return (await this.order(creds, providerRef)).amount;
+  /** Успешная платёжная транзакция заказа (CardCharge, StatusId F) или null. */
+  private async charge(c: VivaCredentials, orderCode: string): Promise<VivaTransaction | null> {
+    const list = await this.http(`${HOSTS[c.env].www}/api/transactions?ordercode=${orderCode}`, {
+      method: 'GET', headers: { authorization: basic(c.merchantId, c.apiKey) } });
+    const text = await list.text();
+    if (!list.ok) throw new VivaError(`Viva transactions: HTTP ${list.status}`, list.status);
+    const txs = (JSON.parse(text) as { Transactions?: VivaTransaction[] }).Transactions ?? [];
+    return txs.find((t) => t.StatusId === 'F' && t.TransactionType?.TransactionTypeId === 5) ?? null;
   }
 
   /**
@@ -261,11 +304,7 @@ export class VivaAdapter implements ProviderAdapter {
     if (!/^\d{6,20}$/.test(req.providerRef)) return { kind: 'declined', reason: 'неверный код заказа' };
     const auth = { authorization: basic(c.merchantId, c.apiKey) };
 
-    const list = await this.http(`${HOSTS[c.env].www}/api/transactions?ordercode=${req.providerRef}`, { method: 'GET', headers: auth });
-    const listText = await list.text();
-    if (!list.ok) throw new VivaError(`Viva transactions: HTTP ${list.status}`, list.status);
-    const txs = (JSON.parse(listText) as { Transactions?: VivaTransaction[] }).Transactions ?? [];
-    const charge = txs.find((t) => t.StatusId === 'F' && t.TransactionType?.TransactionTypeId === 5);
+    const charge = await this.charge(c, req.providerRef);
     if (!charge) return { kind: 'declined', reason: 'у заказа нет успешной оплаты для возврата' };
 
     const qs = new URLSearchParams({ amount: req.amount.toString() });

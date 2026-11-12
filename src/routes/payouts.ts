@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { siteAuth } from '../auth.js';
 import { getTransaction, serializeTx, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
 import type { PaymentDeps } from '../payments/flow.js';
-import { createPayout, executePayout, getPayoutLegs, UnknownPlayerError } from '../payouts/payouts.js';
+import { createPayout, executePayout, getPayoutLegs, UnknownPlayerError, DuplicateWithdrawalError } from '../payouts/payouts.js';
 
 const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER), z.string().regex(/^[1-9]\d{0,17}$/)])
   .transform((v) => BigInt(v));
@@ -11,6 +11,7 @@ const money = z.union([z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 const payoutBody = z.object({
   amount: money,
   currency: z.string().regex(/^[A-Z]{3}$/, 'Код валюты ISO 4217, например EUR'),
+  withdrawalId: z.string().min(1).max(128).regex(/^[\w.:\-]+$/, 'ID вывода в системе казино: буквы, цифры, _ . : -'),
   player: z.object({
     id: z.string().min(1).max(128),
     kyc: z.enum(['none', 'pending', 'verified', 'rejected']).optional(),
@@ -27,6 +28,7 @@ export async function payoutRoutes(app: FastifyInstance, deps: PaymentDeps) {
     const sum = (k: string, st?: string) => legs.filter((l) => l.kind === k && (!st || l.status === st)).reduce((a, l) => a + BigInt(l.amount), 0n);
     return {
       ...serializeTx(tx),
+      withdrawalId: tx.withdrawalId ?? null,
       // Сколько вернётся на карты игрока автоматически и сколько оператор выплачивает вручную.
       refundAmount: (sum('refund') - sum('refund', 'failed')).toString(),
       manualAmount: sum('manual').toString(),
@@ -48,7 +50,7 @@ export async function payoutRoutes(app: FastifyInstance, deps: PaymentDeps) {
     try {
       const { tx, replayed } = await createPayout(pool, {
         siteId: req.site!.siteId, operatorId: req.site!.operatorId, idempotencyKey: key.data,
-        amount: body.data.amount, currency: body.data.currency,
+        amount: body.data.amount, currency: body.data.currency, withdrawalId: body.data.withdrawalId,
         player: { externalId: body.data.player.id, kyc: body.data.player.kyc },
       });
       if (replayed) return reply.code(200).send(await view(tx));
@@ -57,6 +59,9 @@ export async function payoutRoutes(app: FastifyInstance, deps: PaymentDeps) {
       return reply.code(201).send(await view(final));
     } catch (err) {
       if (err instanceof IdempotencyConflictError) return reply.code(409).send({ error: { code: 'idempotency_conflict', message: err.message } });
+      if (err instanceof DuplicateWithdrawalError) {
+        return reply.code(409).send({ error: { code: 'duplicate_withdrawal', message: err.message, details: { payoutId: err.payoutId } } });
+      }
       if (err instanceof UnknownPlayerError) return reply.code(422).send({ error: { code: 'unknown_player', message: err.message } });
       throw err;
     }

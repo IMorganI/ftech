@@ -8,7 +8,7 @@ import { MockAdapter, MockProvider } from './providers/mock.js';
 import { VivaAdapter } from './providers/viva.js';
 import { TestPayAdapter, TestPaySimulator } from './providers/testpay.js';
 import { dispatchOnce } from './webhooks/outbox.js';
-import { reconcilePending } from './payments/flow.js';
+import { reconcilePending, processInbox } from './payments/flow.js';
 import { resumePayouts } from './payouts/payouts.js';
 import { TelegramSender } from './notify/telegram.js';
 import { notifyOnce } from './notify/alerts.js';
@@ -71,6 +71,7 @@ if (config.WORKERS_ENABLED) {
   }
   loop('payouts', 30_000, () => resumePayouts({ pool, providers, secrets, encryptionKey }));
   loop('reconcile', 20_000, () => reconcilePending({ pool, providers, secrets, encryptionKey }, config.RECONCILE_AFTER_SEC));
+  loop('inbox', 15_000, () => processInbox({ pool, providers, secrets, encryptionKey }));
   // Журнал входящих вебхуков нужен для разборов настройки — храним 30 дней.
   loop('webhook-log', 3_600_000, () => pool.query(`DELETE FROM provider_webhook_log WHERE received_at < now() - interval '30 days'`));
 }

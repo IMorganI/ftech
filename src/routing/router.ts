@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Pool } from '../db/pool.js';
 import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
+import { applyRestrictions, type KycStatus } from '../players/restrictions.js';
 
 /*
  * Роутер депозитов.
@@ -19,7 +20,7 @@ import { enqueueSiteEvent } from '../webhooks/outbox.js';
  * успех превращает резерв в оборот и пишет проводки, отказ снимает резерв и пробует следующий аккаунт.
  */
 
-export type KycStatus = 'none' | 'pending' | 'verified' | 'rejected';
+export type { KycStatus };
 
 export interface DepositRequest {
   siteId: string;
@@ -31,9 +32,10 @@ export interface DepositRequest {
   player: {
     externalId: string;
     country: string;
-    kyc: KycStatus;
-    depositLimitDaily: bigint | null;
-    selfExcluded: boolean;
+    /** Необязательные подсказки сайта. Из депозита ограничения можно только ужесточить (см. players/restrictions.ts). */
+    kyc?: KycStatus;
+    depositLimitDaily?: bigint | null;
+    selfExcluded?: boolean;
   };
 }
 
@@ -44,7 +46,8 @@ export type DeclineCode =
   | 'player_limit_exceeded'
   | 'country_not_licensed'
   | 'no_route'
-  | 'all_attempts_failed';
+  | 'all_attempts_failed'
+  | 'provider_unavailable';
 
 export interface TransactionView {
   id: string;
@@ -56,6 +59,8 @@ export interface TransactionView {
   status: 'created' | 'pending' | 'success' | 'declined' | 'failed';
   merchantAccountId: string | null;
   declineCode: string | null;
+  /** Для выплат: ID вывода в системе казино. */
+  withdrawalId?: string | null;
   /** Куда отправить игрока для оплаты (страница провайдера), пока платёж ожидает оплаты. */
   paymentUrl: string | null;
   createdAt: Date;
@@ -82,15 +87,16 @@ interface Candidate {
 interface Pick {
   account: Candidate;
   day: string;
+  currency: string;
   reason: string;
 }
 
-const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, created_at, updated_at`;
+const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, withdrawal_id, created_at, updated_at`;
 
 function toView(r: Record<string, any>): TransactionView {
   return {
     id: r.id, siteId: r.site_id, playerId: r.player_id, type: r.type, amount: r.amount, currency: r.currency,
-    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code,
+    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code, withdrawalId: r.withdrawal_id ?? null,
     paymentUrl: r.payment_url ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -140,15 +146,19 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
   const p = req.player;
   // Upsert игрока сразу блокирует его строку: параллельные депозиты одного игрока идут по очереди,
   // поэтому его дневной лимит нельзя обойти двумя одновременными запросами.
-  const player = (await c.query(
-    `INSERT INTO players (site_id, external_id, country, kyc, deposit_limit_daily, self_excluded)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT (site_id, external_id) DO UPDATE SET
-       country = EXCLUDED.country, kyc = EXCLUDED.kyc, deposit_limit_daily = EXCLUDED.deposit_limit_daily,
-       self_excluded = EXCLUDED.self_excluded, updated_at = now()
-     RETURNING id, sticky_account_id`,
-    [req.siteId, p.externalId, p.country, p.kyc, p.depositLimitDaily, p.selfExcluded],
+  // Ограничения из запроса НЕ перезаписывают сохранённые: применяются только ужесточения.
+  const inserted = (await c.query(
+    `INSERT INTO players (site_id, external_id, country) VALUES ($1, $2, $3)
+     ON CONFLICT (site_id, external_id) DO UPDATE SET country = EXCLUDED.country, updated_at = now()
+     RETURNING *`,
+    [req.siteId, p.externalId, p.country],
   )).rows[0];
+  const delay = (await c.query(`SELECT limit_increase_delay_hours FROM operators WHERE id = $1`, [req.operatorId])).rows[0].limit_increase_delay_hours;
+  const player = await applyRestrictions(c, inserted, {
+    selfExcluded: p.selfExcluded, kyc: p.kyc,
+    // null в депозите не снимает лимит — снятие только через API ограничений.
+    depositLimitDaily: p.depositLimitDaily === null ? undefined : p.depositLimitDaily,
+  }, 'deposit', { increaseDelayHours: delay });
 
   const op = (await c.query(
     `SELECT licenses, kyc_required_above, max_attempts FROM operators WHERE id = $1`, [req.operatorId],
@@ -162,7 +172,7 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
     )).rows[0]);
 
   // 1. Проверки игрока
-  const decline = await playerDecline(c, req, player.id, op);
+  const decline = await playerDecline(c, req, player, op);
   if (decline) return insertTx('declined', null, decline);
 
   // 2–4. Выбор аккаунта
@@ -180,22 +190,23 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
 }
 
 async function playerDecline(
-  c: Client, req: DepositRequest, playerId: string,
+  c: Client, req: DepositRequest, player: { id: string; self_excluded: boolean; kyc: KycStatus; deposit_limit_daily: bigint | null },
   op: { licenses: string[]; kyc_required_above: bigint | null },
 ): Promise<DeclineCode | null> {
-  const p = req.player;
-  if (p.selfExcluded) return 'player_self_excluded';
-  if (!op.licenses.map((l) => l.trim()).includes(p.country)) return 'country_not_licensed';
-  if (p.kyc === 'rejected') return 'kyc_rejected';
-  if (p.kyc !== 'verified' && op.kyc_required_above !== null && req.amount > op.kyc_required_above) return 'kyc_required';
-  if (p.depositLimitDaily !== null) {
+  // Решения принимаются по СОХРАНЁННЫМ ограничениям игрока, а не по тому, что прислал запрос.
+  if (player.self_excluded) return 'player_self_excluded';
+  if (!op.licenses.map((l) => l.trim()).includes(req.player.country)) return 'country_not_licensed';
+  if (player.kyc === 'rejected') return 'kyc_rejected';
+  if (player.kyc !== 'verified' && op.kyc_required_above !== null && req.amount > op.kyc_required_above) return 'kyc_required';
+  if (player.deposit_limit_daily !== null) {
+    // Лимит игрока — в валюте депозита: суммы разных валют не складываются.
     const today = (await c.query(
       `SELECT coalesce(sum(amount), 0)::bigint AS total FROM transactions
-       WHERE player_id = $1 AND type = 'deposit' AND status IN ('pending', 'success')
+       WHERE player_id = $1 AND type = 'deposit' AND currency = $2 AND status IN ('pending', 'success')
          AND created_at >= (date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`,
-      [playerId],
+      [player.id, req.currency],
     )).rows[0].total as bigint;
-    if (today + req.amount > p.depositLimitDaily) return 'player_limit_exceeded';
+    if (today + req.amount > player.deposit_limit_daily) return 'player_limit_exceeded';
   }
   return null;
 }
@@ -224,27 +235,28 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
   if (!cands.length) return null;
 
   // Строки оборота на сегодня: создаём, если их нет, и блокируем в порядке id.
+  // Оборот считается в валюте платежа: разные валюты не складываются.
   await c.query(
-    `INSERT INTO account_usage (merchant_account_id, day)
-     SELECT * FROM unnest($1::uuid[], $2::date[]) ON CONFLICT DO NOTHING`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    `INSERT INTO account_usage (merchant_account_id, day, currency)
+     SELECT k.id, k.day, $3 FROM unnest($1::uuid[], $2::date[]) AS k(id, day) ON CONFLICT DO NOTHING`,
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   );
   const usage = new Map<string, { used: bigint; reserved: bigint }>();
   for (const r of (await c.query(
     `SELECT u.merchant_account_id AS id, u.used, u.reserved
      FROM account_usage u JOIN unnest($1::uuid[], $2::date[]) AS k(id, day)
-       ON u.merchant_account_id = k.id AND u.day = k.day
+       ON u.merchant_account_id = k.id AND u.day = k.day AND u.currency = $3
      ORDER BY u.merchant_account_id FOR UPDATE OF u`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   )).rows) usage.set(r.id, { used: r.used, reserved: r.reserved });
 
   const monthly = new Map<string, bigint>();
   for (const r of (await c.query(
     `SELECT u.merchant_account_id AS id, sum(u.used + u.reserved)::bigint AS total
      FROM account_usage u JOIN unnest($1::uuid[], $2::date[]) AS k(id, day)
-       ON u.merchant_account_id = k.id AND u.day >= date_trunc('month', k.day) AND u.day <= k.day
+       ON u.merchant_account_id = k.id AND u.day >= date_trunc('month', k.day) AND u.day <= k.day AND u.currency = $3
      GROUP BY u.merchant_account_id`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   )).rows) monthly.set(r.id, r.total);
 
   const skipped: string[] = [];
@@ -274,13 +286,13 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
   if (inp.stickyAccountId && best.id !== inp.stickyAccountId) reason += '; прошлый аккаунт игрока недоступен';
   if (skipped.length) reason += `; пропущены: ${skipped.join(', ')}`;
   if (inp.exclude.length) reason += `; каскад после ${inp.exclude.length} отказа(ов)`;
-  return { account: best, day: best.today, reason };
+  return { account: best, day: best.today, currency: inp.currency, reason };
 }
 
 async function reserve(c: Client, pick: Pick, amount: bigint) {
   await c.query(
-    `UPDATE account_usage SET reserved = reserved + $3 WHERE merchant_account_id = $1 AND day = $2`,
-    [pick.account.id, pick.day, amount],
+    `UPDATE account_usage SET reserved = reserved + $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`,
+    [pick.account.id, pick.day, amount, pick.currency],
   );
 }
 
@@ -294,7 +306,9 @@ async function insertAttempt(c: Client, txId: string, pick: Pick, no: number) {
 
 export type AttemptOutcome =
   | { status: 'success'; providerRef?: string; attemptId?: string }
-  | { status: 'declined'; providerRef?: string; error?: string; attemptId?: string };
+  | { status: 'declined'; providerRef?: string; error?: string; attemptId?: string;
+      /** Без каскада: платёж закрывается отказом с этим кодом (например, судьба прошлой отправки неизвестна). */
+      final?: DeclineCode };
 
 /**
  * Применяет результат текущей попытки. Повторный вызов для уже завершённого платежа ничего не меняет
@@ -317,11 +331,11 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
     if (outcome.attemptId && outcome.attemptId !== attempt.id) return toView(tx);
 
     const amount = tx.amount as bigint;
-    const usageArgs = [attempt.merchant_account_id, attempt.usage_day, amount];
+    const usageArgs = [attempt.merchant_account_id, attempt.usage_day, amount, (tx.currency as string).trim()];
 
     if (outcome.status === 'success') {
       await c.query(
-        `UPDATE account_usage SET reserved = reserved - $3, used = used + $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
+        `UPDATE account_usage SET reserved = reserved - $3, used = used + $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`, usageArgs);
       await c.query(`UPDATE transaction_attempts SET status = 'success', provider_ref = coalesce($2, provider_ref) WHERE id = $1`,
         [attempt.id, outcome.providerRef ?? null]);
       await c.query(`UPDATE players SET sticky_account_id = $2, updated_at = now() WHERE id = $1`,
@@ -344,7 +358,7 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
     }
 
     // Отказ провайдера: снимаем резерв и пробуем следующий аккаунт (каскад).
-    await c.query(`UPDATE account_usage SET reserved = reserved - $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
+    await c.query(`UPDATE account_usage SET reserved = reserved - $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`, usageArgs);
     await c.query(`UPDATE transaction_attempts SET status = 'declined', provider_ref = coalesce($2, provider_ref), error = $3 WHERE id = $1`,
       [attempt.id, outcome.providerRef ?? null, outcome.error ?? null]);
 
@@ -356,7 +370,7 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
        WHERE t.id = $1 GROUP BY p.country, p.sticky_account_id, s.operator_id, o.max_attempts`, [txId],
     )).rows[0];
 
-    const next = attempt.attempt_no < ctx.max_attempts
+    const next = !outcome.final && attempt.attempt_no < ctx.max_attempts
       ? await pickAccount(c, {
           operatorId: ctx.operator_id, currency: tx.currency.trim(), country: ctx.country.trim(), amount,
           stickyAccountId: ctx.sticky_account_id, exclude: ctx.tried,
@@ -365,8 +379,9 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
 
     if (!next) {
       const done = toView((await c.query(
-        `UPDATE transactions SET status = 'declined', decline_code = 'all_attempts_failed', merchant_account_id = NULL,
-           updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`, [txId])).rows[0]);
+        `UPDATE transactions SET status = 'declined', decline_code = $2, merchant_account_id = NULL,
+           updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`,
+        [txId, outcome.status === 'declined' && outcome.final ? outcome.final : 'all_attempts_failed'])).rows[0]);
       await enqueueSiteEvent(c, done, 'deposit.declined');
       return done;
     }

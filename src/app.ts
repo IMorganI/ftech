@@ -9,6 +9,7 @@ import { testPayRoutes } from './routes/testpay.js';
 import { depositRoutes } from './routes/deposits.js';
 import { payoutRoutes } from './routes/payouts.js';
 import { providerWebhookRoutes } from './routes/provider-webhooks.js';
+import { playerRoutes } from './routes/players.js';
 import { mockProviderRoutes } from './routes/mock-provider.js';
 import { adminPlugin } from './admin/index.js';
 import { boardRoutes } from './admin/board.js';
@@ -76,6 +77,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
       });
       await api.register(depositRoutes, payment);
       await api.register(payoutRoutes, payment);
+      await api.register(playerRoutes, payment);
     });
 
     // Вебхуки провайдеров: без ключа сайта, защищены подписью провайдера.
