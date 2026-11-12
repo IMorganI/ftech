@@ -109,6 +109,12 @@ export function signMockWebhook(secret: string, body: string, ts = Math.floor(Da
 
 export class MockAdapter implements ProviderAdapter {
   readonly name = 'mock';
+  readonly title = 'Тестовый провайдер (без реальных денег)';
+  readonly credentialFields = [];
+
+  async checkConnection(): Promise<{ name: string; ok: boolean; message: string }[]> {
+    return [{ name: 'Тестовый провайдер', ok: true, message: 'Ключи не нужны, оплата — на тестовой странице' }];
+  }
   constructor(private provider: MockProvider) {}
 
   async createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult> {

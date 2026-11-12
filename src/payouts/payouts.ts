@@ -3,6 +3,7 @@ import type { Pool } from '../db/pool.js';
 import { withTransaction, isUniqueViolation, type Client } from '../db/tx.js';
 import type { PaymentDeps } from '../payments/flow.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
+import { accountCredentials } from '../providers/credentials.js';
 import { getTransactionById, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
 
 /*
@@ -139,8 +140,7 @@ export async function executePayout(d: PaymentDeps, payoutId: string): Promise<T
     }
     let result;
     try {
-      if (!leg.credentials_ref) throw new Error('у аккаунта не задан credentials_ref');
-      result = await adapter.refund({ accountId: leg.account_id, secret: await d.secrets.get(leg.credentials_ref) },
+      result = await adapter.refund(await accountCredentials(d, leg.account_id),
         { providerRef: leg.provider_ref, amount: leg.amount, currency: leg.currency.trim(), reference: leg.id });
     } catch (err) {
       // Неизвестно, прошёл ли возврат: не повторяем автоматически, отдаём человеку.

@@ -21,7 +21,7 @@ export interface AppDeps {
   /** Запросов в минуту на один API-ключ (или IP без ключа). */
   rateLimitPerMinute?: number;
   /** Админка: ключ шифрования секретов и флаг HTTPS-cookie. */
-  admin?: { encryptionKey: Buffer; secureCookies: boolean; loginRateLimitPerMinute?: number };
+  admin?: { encryptionKey: Buffer; secureCookies: boolean; loginRateLimitPerMinute?: number; webhookBaseUrl?: string };
   trustProxy?: boolean;
 }
 
@@ -57,7 +57,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
 
   const { pool, providers, secrets } = deps;
   if (pool && providers && secrets) {
-    const payment = { pool, providers, secrets };
+    const payment = { pool, providers, secrets, encryptionKey: deps.admin?.encryptionKey };
 
     // API для сайтов: авторизация по ключу + ограничение частоты.
     app.register(async (api) => {
@@ -83,7 +83,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
   if (pool && deps.admin) {
     // Корень сайта ведёт в борду: удобно открывать адрес без /admin.
     app.get('/', async (_req, reply) => reply.redirect('/admin', 302));
-    app.register(adminPlugin, { pool, ...deps.admin });
+    app.register(adminPlugin, { pool, ...deps.admin, providers, secrets });
     app.register(boardRoutes);
   }
 

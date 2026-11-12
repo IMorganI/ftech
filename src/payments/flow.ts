@@ -4,6 +4,7 @@ import type { SecretStore } from '../secrets.js';
 import { InvalidWebhookError, type ProviderRegistry, type AccountCredentials, type ProviderAdapter } from '../providers/types.js';
 import { resolveAttempt, getTransactionById, type TransactionView } from '../routing/router.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
+import { accountCredentials } from '../providers/credentials.js';
 
 /*
  * Связь роутера с провайдерами.
@@ -17,6 +18,8 @@ export interface PaymentDeps {
   pool: Pool;
   providers: ProviderRegistry;
   secrets: SecretStore;
+  /** Для ключей провайдеров, введённых в борде (зашифрованы в базе). */
+  encryptionKey?: Buffer;
 }
 
 interface AttemptRow {
@@ -43,9 +46,8 @@ const ATTEMPT_SELECT = `
   JOIN transactions t ON t.id = a.transaction_id
   JOIN players pl ON pl.id = t.player_id`;
 
-async function credsFor(d: PaymentDeps, accountId: string, ref: string | null): Promise<AccountCredentials> {
-  if (!ref) throw new Error(`У аккаунта ${accountId} не задан credentials_ref`);
-  return { accountId, secret: await d.secrets.get(ref) };
+async function credsFor(d: PaymentDeps, accountId: string, _ref?: string | null): Promise<AccountCredentials> {
+  return accountCredentials(d, accountId);
 }
 
 /**

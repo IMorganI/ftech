@@ -46,8 +46,34 @@ export interface VerifiedWebhook {
 
 export class InvalidWebhookError extends Error {}
 
+/** Поле формы ключей провайдера в борде. */
+export interface CredentialField {
+  key: string;
+  label: string;
+  secret?: boolean;
+  required?: boolean;
+  options?: string[];
+  default?: string;
+  placeholder?: string;
+  help?: string;
+}
+
+export interface ConnectionCheck {
+  name: string;
+  ok: boolean;
+  message: string;
+}
+
 export interface ProviderAdapter {
   readonly name: string;
+  /** Название для людей: «Viva Wallet (Smart Checkout)». */
+  readonly title?: string;
+  /** Какие ключи вводить в борде. */
+  readonly credentialFields?: CredentialField[];
+  /** Как настроить вебхук у провайдера: поле токена в секрете, события, подсказка. */
+  readonly webhook?: { tokenField: string; events: string[]; help: string };
+  /** Проверка ключей без создания платежей: что работает, что нет и почему. */
+  checkConnection?(creds: AccountCredentials): Promise<ConnectionCheck[]>;
   createPayment(creds: AccountCredentials, req: CreatePaymentRequest): Promise<CreatePaymentResult>;
   /** Статус у провайдера. Используется и после вебхука: содержимому вебхука на слово не верим. */
   getStatus(creds: AccountCredentials, providerRef: string): Promise<ProviderStatus>;
@@ -68,6 +94,9 @@ export class ProviderRegistry {
   register(a: ProviderAdapter): this {
     this.adapters.set(a.name, a);
     return this;
+  }
+  list(): ProviderAdapter[] {
+    return [...this.adapters.values()];
   }
   get(name: string): ProviderAdapter {
     const a = this.adapters.get(name);
