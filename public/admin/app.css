@@ -314,3 +314,17 @@ table td .note { max-width: 46ch; }
 
 /* дочерние элементы панели не растягивают её шире экрана (широкие таблицы прокручиваются внутри .tbl) */
 .panel > * { min-width: 0; }
+
+/* ёмкость */
+.panel.cap.warn { border-left: 4px solid var(--warn); }
+.panel.cap.bad { border-left: 4px solid var(--bad); }
+.cap-main { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.cap-free { font: 600 28px/1.15 var(--mono); color: var(--ok); font-variant-numeric: tabular-nums; }
+.panel.cap.bad .cap-free { color: var(--bad); }
+.cap-rate { font: 600 20px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.capbar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--track); }
+.capbar i { display: block; height: 100%; }
+.capbar .p-taken, .legend .sw.p-taken { background: var(--accent); }
+.capbar .p-free, .legend .sw.p-free { background: var(--ok); opacity: .35; }
+.capbar .r-taken, .legend .sw.r-taken { background: var(--warn); }
+.capbar .r-free, .legend .sw.r-free { background: var(--warn); opacity: .3; }

@@ -60,7 +60,9 @@ describe.skipIf(!url)('Уведомления о проблемах', () => {
 
   it('сообщает о расхождении, недоставленном вебхуке, лимите аккаунта и недоступном провайдере', async () => {
     const { sent, sender } = collector();
-    expect(await notifyOnce(pool, sender, board)).toBe(4);
+    // 4 события + общая ёмкость EUR дошла до 70% и 90% (единственный аккаунт заполнен на 96%).
+    expect(await notifyOnce(pool, sender, board)).toBe(6);
+    expect(sent.filter((t) => /Занято \d+% дневных лимитов в EUR/.test(t))).toHaveLength(2);
     expect(sent.join('\n---\n')).toMatch(/закрыли[\s\S]*#issues/);
     expect(sent.some((t) => t.includes('casino') && t.includes('HTTP 500'))).toBe(true);
     expect(sent.some((t) => t.includes('Viva demo') && t.includes('95%') && t.includes('960.00'))).toBe(true);
@@ -71,7 +73,7 @@ describe.skipIf(!url)('Уведомления о проблемах', () => {
     const { sent, sender } = collector();
     await notifyOnce(pool, sender, board);
     expect(await notifyOnce(pool, sender, board)).toBe(0);
-    expect(sent).toHaveLength(4);
+    expect(sent).toHaveLength(6);
   });
 
   it('если Telegram недоступен — отправит на следующем проходе', async () => {
@@ -80,7 +82,7 @@ describe.skipIf(!url)('Уведомления о проблемах', () => {
     const flaky = { send: async (t: string) => { if (fail) throw new Error('network'); sent.push(t); } };
     await expect(notifyOnce(pool, flaky, board)).rejects.toThrow('network');
     fail = false;
-    expect(await notifyOnce(pool, flaky, board)).toBe(4);
+    expect(await notifyOnce(pool, flaky, board)).toBe(6);
   });
 
   it('закрытое расхождение и выключенный аккаунт не тревожат', async () => {

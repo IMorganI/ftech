@@ -218,7 +218,9 @@ describe.skipIf(!url)('Ядро', () => {
          VALUES ($1, $2, 'multi', '{EUR,USD}', '{MT}', 100, 100000, 10000, 10000, 'MOCK') RETURNING id`, [op, prov])).rows[0].id;
       expect((await deposit(8000)).json().status).toBe('pending');
       expect((await deposit(8000, {}, 'USD')).json().status).toBe('pending'); // раньше: 8000 EUR + 8000 USD > 10000 → отказ
-      expect((await deposit(3000)).json().declineCode).toBe('no_route');
+      const r = (await deposit(3000)).json();
+      expect(r.declineCode).toBe('capacity_exhausted');
+      expect(r.declineDetails).toEqual({ maxAmountNow: '2000' }); // 10000 − 8000
       const rows = (await pool.query(`SELECT currency, reserved FROM account_usage WHERE merchant_account_id = $1 ORDER BY currency`, [acc])).rows;
       expect(rows.map((r) => [r.currency, r.reserved])).toEqual([['EUR', 8000n], ['USD', 8000n]]);
     });

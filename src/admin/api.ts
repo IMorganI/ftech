@@ -142,7 +142,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   // ---------- операторы ----------
 
   app.get('/admin/v1/operators', viewer, async () =>
-    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, platform_fee_bps, payout_kyc_required, payout_max_amount, manual_approval_above, limit_increase_delay_hours, created_at FROM operators ORDER BY name`)).rows));
+    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, platform_fee_bps, payout_kyc_required, payout_max_amount, manual_approval_above, limit_increase_delay_hours, routing_mode, created_at FROM operators ORDER BY name`)).rows));
 
   const operatorBody = z.object({
     name: z.string().min(1).max(200),
@@ -153,10 +153,11 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
     payoutMaxAmount: money.nullable(),
     manualApprovalAbove: z.union([z.literal(0), money]).nullable().transform((v) => (v === 0 ? 0n : v)),
     limitIncreaseDelayHours: z.number().int().min(0).max(720),
+    routingMode: z.enum(['fill', 'weights']),
   });
 
   app.post('/admin/v1/operators', admin, async (req, reply) => {
-    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true, platformFeeBps: true, payoutMaxAmount: true, manualApprovalAbove: true, limitIncreaseDelayHours: true }), req.body, reply);
+    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true, platformFeeBps: true, payoutMaxAmount: true, manualApprovalAbove: true, limitIncreaseDelayHours: true, routingMode: true }), req.body, reply);
     if (!b) return;
     const row = (await pool.query(
       `INSERT INTO operators (name, licenses, kyc_required_above, max_attempts, platform_fee_bps) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -179,10 +180,10 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
            max_attempts = coalesce($6, max_attempts), platform_fee_bps = coalesce($7, platform_fee_bps),
            payout_max_amount = CASE WHEN $8::boolean THEN $9 ELSE payout_max_amount END,
            manual_approval_above = CASE WHEN $10::boolean THEN $11 ELSE manual_approval_above END,
-           limit_increase_delay_hours = coalesce($12, limit_increase_delay_hours) WHERE id = $1 RETURNING *`,
+           limit_increase_delay_hours = coalesce($12, limit_increase_delay_hours), routing_mode = coalesce($13, routing_mode) WHERE id = $1 RETURNING *`,
         [id.data, b.name ?? null, b.licenses ?? null, b.kycRequiredAbove !== undefined, b.kycRequiredAbove ?? null, b.maxAttempts ?? null, b.platformFeeBps ?? null,
          b.payoutMaxAmount !== undefined, b.payoutMaxAmount ?? null, b.manualApprovalAbove !== undefined, b.manualApprovalAbove ?? null,
-         b.limitIncreaseDelayHours ?? null])).rows[0];
+         b.limitIncreaseDelayHours ?? null, b.routingMode ?? null])).rows[0];
       await audit(c, { ...who(req), action: 'operator.update', entity: 'operator', entityId: id.data, before, after });
       return plain(after);
     });
@@ -269,7 +270,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
 
   const ACCOUNT_SELECT = `
     SELECT m.id, m.operator_id, m.provider_id, p.code AS provider_code, m.name, m.currencies, m.countries,
-           m.min_amount, m.max_amount, m.daily_cap, m.monthly_cap, m.switch_at_bps, m.fee_bps, m.priority,
+           m.min_amount, m.max_amount, m.daily_cap, m.monthly_cap, m.switch_at_bps, m.fee_bps, m.priority, m.tier, m.weight,
            m.cap_timezone, m.credentials_ref, m.enabled, m.created_at,
            coalesce(u.used, 0) AS used_today, coalesce(u.reserved, 0) AS reserved_today
     FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id
@@ -282,6 +283,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   const opFields = z.object({
     enabled: z.boolean(), dailyCap: money, monthlyCap: money.nullable(),
     switchAtBps: z.number().int().min(1).max(10000), feeBps: z.number().int().min(0).max(10000), priority: z.number().int().min(-1000).max(1000),
+    tier: z.enum(['primary', 'reserve']), weight: z.number().int().min(1).max(10000),
   });
   const adminFields = z.object({
     name: z.string().min(1).max(200), currencies: z.array(currency).length(1, 'Одна валюта на аккаунт: лимиты считаются в ней'), countries: z.array(country).min(1).max(250),
@@ -289,7 +291,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   });
 
   app.post('/admin/v1/accounts', admin, async (req, reply) => {
-    const b = parse(opFields.partial({ enabled: true, monthlyCap: true, switchAtBps: true, feeBps: true, priority: true })
+    const b = parse(opFields.partial({ enabled: true, monthlyCap: true, switchAtBps: true, feeBps: true, priority: true, tier: true, weight: true })
       .merge(adminFields.partial({ capTimezone: true, credentialsRef: true }))
       .extend({ operatorId: uuid, providerId: uuid }), req.body, reply);
     if (!b) return;
@@ -338,11 +340,13 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
              switch_at_bps = coalesce($6, switch_at_bps), fee_bps = coalesce($7, fee_bps), priority = coalesce($8, priority),
              name = coalesce($9, name), currencies = coalesce($10, currencies), countries = coalesce($11, countries),
              min_amount = coalesce($12, min_amount), max_amount = coalesce($13, max_amount), cap_timezone = coalesce($14, cap_timezone),
-             credentials_ref = CASE WHEN $15::boolean THEN $16 ELSE credentials_ref END
+             credentials_ref = CASE WHEN $15::boolean THEN $16 ELSE credentials_ref END,
+             tier = coalesce($17, tier), weight = coalesce($18, weight)
            WHERE id = $1`,
           [id.data, b.enabled ?? null, b.dailyCap ?? null, b.monthlyCap !== undefined, b.monthlyCap ?? null,
            b.switchAtBps ?? null, b.feeBps ?? null, b.priority ?? null, b.name ?? null, b.currencies ?? null, b.countries ?? null,
-           b.minAmount ?? null, b.maxAmount ?? null, b.capTimezone ?? null, b.credentialsRef !== undefined, b.credentialsRef ?? null]);
+           b.minAmount ?? null, b.maxAmount ?? null, b.capTimezone ?? null, b.credentialsRef !== undefined, b.credentialsRef ?? null,
+           b.tier ?? null, b.weight ?? null]);
         const after = (await c.query(`${ACCOUNT_SELECT} WHERE m.id = $1`, [id.data])).rows[0];
         await audit(c, { ...who(req), action: 'account.update', entity: 'account', entityId: id.data, before, after });
         return plain(after);
