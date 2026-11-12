@@ -1,0 +1,41 @@
+name: Uptime
+
+# Каждые 10 минут проверяет, что сервер отвечает и видит базу (GET /ready).
+# Не отвечает — сообщение в Telegram. Адреса — переменная репозитория UPTIME_URLS (через пробел),
+# Telegram — секреты TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID. Пока UPTIME_URLS не задана — ничего не делает.
+# Это страховка «снаружи»; для точного мониторинга подключи ещё внешний сервис (см. docs/DEPLOY.md).
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: vars.UPTIME_URLS != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Проверка /ready
+        env:
+          URLS: ${{ vars.UPTIME_URLS }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          failed=""
+          for u in $URLS; do
+            ok=""
+            for i in 1 2 3; do
+              if curl -fsS --max-time 10 "$u/ready" >/dev/null; then ok=1; break; fi
+              sleep 10
+            done
+            [ -n "$ok" ] || failed="$failed $u"
+          done
+          if [ -n "$failed" ]; then
+            [ -n "$TG_TOKEN" ] && curl -fsS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" --data-urlencode "text=🚨 ftech не отвечает:${failed}" >/dev/null
+            echo "Не отвечает:$failed"; exit 1
+          fi
+          echo "Все адреса отвечают"

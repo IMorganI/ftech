@@ -1,0 +1,37 @@
+#cloud-config
+# Первичная настройка сервера (Ubuntu 24.04). Вставь в поле «Cloud config» при создании сервера в Hetzner,
+# заменив ключ SSH на свой. Что делает: пользователь deploy только по ключу, вход root и по паролю запрещён,
+# файрвол (22, 80, 443), fail2ban, автоматические обновления безопасности, Docker, rclone, cron бэкапов.
+
+users:
+  - name: deploy
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAA...ВСТАВЬ_СВОЙ_ПУБЛИЧНЫЙ_КЛЮЧ deploy
+
+package_update: true
+package_upgrade: true
+packages: [ufw, fail2ban, unattended-upgrades, rclone, curl, ca-certificates]
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/10-ftech.conf
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+  - path: /etc/cron.d/ftech
+    content: |
+      # Бэкап каждую ночь в 03:17 UTC, проверка восстановления — по воскресеньям в 05:23 UTC
+      17 3 * * * deploy /opt/ftech/deploy/backup.sh >> /var/log/ftech-backup.log 2>&1
+      23 5 * * 0 deploy /opt/ftech/deploy/restore-check.sh >> /var/log/ftech-backup.log 2>&1
+
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker deploy
+  - ufw default deny incoming && ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 443/udp && ufw --force enable
+  - systemctl enable --now fail2ban
+  - mkdir -p /opt/ftech/backups && chown -R deploy:deploy /opt/ftech
+  - touch /var/log/ftech-backup.log && chown deploy /var/log/ftech-backup.log
+  - systemctl restart ssh

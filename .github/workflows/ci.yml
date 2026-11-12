@@ -40,3 +40,21 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # Образ для продакшна должен собираться на каждом PR — иначе поломку Dockerfile увидим только при выкладке.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Сборка Docker-образа
+        run: docker build --pull -t ftech:ci .
+      - name: Образ запускается и проверяет конфигурацию
+        run: |
+          # Без базы сервер должен упасть с понятной ошибкой конфигурации, а не с ошибкой сборки
+          out=$(docker run --rm -e DATABASE_URL=postgres://x@127.0.0.1:1/x -e ENCRYPTION_KEY=$(openssl rand -base64 32) \
+            -e MOCK_PROVIDER_ENABLED=true ftech:ci 2>&1 || true)
+          echo "$out" | grep -q "MOCK_PROVIDER_ENABLED=true запрещён" || { echo "$out"; exit 1; }
+
