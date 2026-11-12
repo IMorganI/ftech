@@ -76,6 +76,8 @@ GitHub → аватарка → **Settings → Codespaces → Secrets → New se
 | Создать оплату | `POST {api}/checkout/v2/orders` `{ amount (центы), customerTrns, merchantTrns: ID попытки, sourceCode }` |
 | Страница оплаты | `{www}/web/checkout?ref=<orderCode>` |
 | Статус | `GET {www}/api/orders/<orderCode>`, Basic merchantId:apiKey → `StateId` 0 ждёт, 1 истёк, 2 отменён, 3 оплачен |
+| Найти оплату заказа | `GET {www}/api/transactions?ordercode=<orderCode>`, Basic → `Transactions[]`, берём `TransactionType.TransactionTypeId = 5` (CardCharge) и `StatusId = F` |
+| Возврат (для выплат) | `DELETE {www}/api/transactions/<TransactionId>/?amount=<сумма>&sourceCode=…`, Basic → `Success`, `StatusId` F/E, `ErrorText` (например `PaymentsInvalidAmountForVoid` — больше остатка) |
 | Ключ вебхука | `GET {www}/api/messages/config/token`, Basic merchantId:apiKey → `{ Key }` |
 
 Хосты demo: `demo-accounts.vivapayments.com`, `demo-api.vivapayments.com`, `demo.vivapayments.com`;

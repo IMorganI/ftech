@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
-  type ProviderAdapter, type ProviderStatus, type VerifiedWebhook,
+  type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
 } from './types.js';
 
 /*
@@ -41,6 +41,13 @@ const HOSTS = {
 
 export type HttpFetch = (url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }) =>
   Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+
+interface VivaTransaction {
+  TransactionId: string;
+  StatusId: string;
+  Amount: number;
+  TransactionType?: { TransactionTypeId: number; Name?: string };
+}
 
 export class VivaError extends Error {
   constructor(message: string, readonly status?: number) { super(message); }
@@ -170,6 +177,33 @@ export class VivaAdapter implements ProviderAdapter {
 
   async paidAmount(creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
     return (await this.order(creds, providerRef)).amount;
+  }
+
+  /**
+   * Возврат на карту: находим платёжную транзакцию заказа (CardCharge, статус F) и вызываем
+   * DELETE /api/transactions/<id>/?amount=<центы>. Частичный возврат разрешён, но не больше суммы оплаты.
+   */
+  async refund(creds: AccountCredentials, req: RefundRequest): Promise<RefundResult> {
+    const c = parseVivaCredentials(creds.secret);
+    if (!/^\d{6,20}$/.test(req.providerRef)) return { kind: 'declined', reason: 'неверный код заказа' };
+    const auth = { authorization: basic(c.merchantId, c.apiKey) };
+
+    const list = await this.http(`${HOSTS[c.env].www}/api/transactions?ordercode=${req.providerRef}`, { method: 'GET', headers: auth });
+    const listText = await list.text();
+    if (!list.ok) throw new VivaError(`Viva transactions: HTTP ${list.status}`, list.status);
+    const txs = (JSON.parse(listText) as { Transactions?: VivaTransaction[] }).Transactions ?? [];
+    const charge = txs.find((t) => t.StatusId === 'F' && t.TransactionType?.TransactionTypeId === 5);
+    if (!charge) return { kind: 'declined', reason: 'у заказа нет успешной оплаты для возврата' };
+
+    const qs = new URLSearchParams({ amount: req.amount.toString() });
+    if (c.sourceCode) qs.set('sourceCode', c.sourceCode);
+    const res = await this.http(`${HOSTS[c.env].www}/api/transactions/${charge.TransactionId}/?${qs}`, { method: 'DELETE', headers: auth });
+    const text = await res.text();
+    let body: { Success?: boolean; StatusId?: string; TransactionId?: string; ErrorText?: string | null; ErrorCode?: number } = {};
+    try { body = JSON.parse(text); } catch { /* пусто или не JSON */ }
+    if (res.status >= 500 || res.status === 429 || res.status === 401) throw new VivaError(`Viva refund: HTTP ${res.status}`, res.status);
+    if (res.ok && body.Success !== false && body.StatusId === 'F') return { kind: 'success', refundRef: body.TransactionId };
+    return { kind: 'declined', reason: `viva_refund: ${body.ErrorText ?? vivaErrorText(res.status, text)}`.slice(0, 300) };
   }
 
   verifyWebhook(creds: AccountCredentials, _headers: Record<string, string | string[] | undefined>, rawBody: string,

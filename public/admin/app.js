@@ -169,7 +169,7 @@ function showChangePassword() {
 // ---------- каркас ----------
 
 const TABS = [
-  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['accounts', 'Аккаунты', 'viewer'],
+  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['manual', 'Выплаты', 'viewer'], ['accounts', 'Аккаунты', 'viewer'],
   ['sandbox', 'Тест-платёж', 'viewer'], ['issues', 'Проблемы', 'viewer'], ['sites', 'Сайты', 'admin'],
   ['setup', 'Настройки', 'admin'], ['users', 'Команда', 'admin'], ['audit', 'Журнал', 'admin'],
 ];
@@ -205,7 +205,7 @@ function renderShell() {
   };
   run();
   // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
-  if (['overview', 'payments', 'accounts', 'issues'].includes(state.tab)) {
+  if (['overview', 'payments', 'manual', 'accounts', 'issues'].includes(state.tab)) {
     state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
   }
 }
@@ -263,7 +263,9 @@ async function viewOverview(main) {
   const feePct = s.platformFeeBps.max === null ? null : s.platformFeeBps.min === s.platformFeeBps.max
     ? `${s.platformFeeBps.max / 100}%` : `${s.platformFeeBps.min / 100}–${s.platformFeeBps.max / 100}%`;
   const periodName = PERIODS.find(([id]) => id === period)[1].toLowerCase();
-  const attention = o.open_issues + o.failed_webhooks;
+  const attention = o.open_issues + o.failed_webhooks + o.manual_payouts;
+  const paidOut = (s.payouts || []).filter((r) => BigInt(r.paid_out) !== 0n).map((r) => money(r.paid_out, r.currency));
+  const payoutsDone = (s.payouts || []).reduce((a, r) => a + r.succeeded, 0);
 
   const kpi = (label, value, sub, cls) => h('div', { class: `kpi ${cls || ''}` },
     h('span', { class: 'kpi-label' }, label),
@@ -292,6 +294,7 @@ async function viewOverview(main) {
           attempts ? `из ${attempts} ${plural(attempts, 'попытки', 'попыток', 'попыток')}` + (pending ? ` · ${pending} ждут оплаты` : '') : 'попыток не было', 'main'),
         kpi('Конверсия', conversion === null ? '—' : `${conversion}%`, declined ? `${declined} ${plural(declined, 'отказ', 'отказа', 'отказов')}` : 'отказов нет'),
         kpi('Оборот', volume, 'сумма успешных депозитов'),
+        kpi('Выплачено игрокам', paidOut, payoutsDone ? `${payoutsDone} ${plural(payoutsDone, 'выплата', 'выплаты', 'выплат')}` : 'выплат не было'),
         kpi('Заработали', earned, feePct === null ? null : `комиссия платформы ${feePct}` + (cost.length ? ` · провайдерам ушло ${cost.join(', ')}` : ''), 'money')),
       feePct === '0%' ? h('div', { class: 'msg warn' }, 'Комиссия платформы не задана — заработок считается как 0. Укажи процент во вкладке «Настройки» у оператора.') : null,
       h('div', { class: 'chart-wrap' }, depositsChart(s.series, s.unit)),
@@ -320,8 +323,9 @@ async function viewOverview(main) {
       h('h2', null, 'Требует внимания'),
       attention ? h('ul', { class: 'plain' },
         o.open_issues ? h('li', null, h('button', { class: 'link', onclick: goto('issues') }, `${o.open_issues} ${plural(o.open_issues, 'расхождение', 'расхождения', 'расхождений')} с провайдерами`), ' — нужно проверить вручную') : null,
+        o.manual_payouts ? h('li', null, h('button', { class: 'link', onclick: goto('manual') }, `${o.manual_payouts} ${plural(o.manual_payouts, 'ручная выплата ждёт', 'ручные выплаты ждут', 'ручных выплат ждут')}`), ' — переведи и отметь выполненной') : null,
         o.failed_webhooks ? h('li', null, `${o.failed_webhooks} ${plural(o.failed_webhooks, 'уведомление', 'уведомления', 'уведомлений')} сайтам не удалось доставить — проверь адреса вебхуков во вкладке «Сайты»`) : null)
-        : h('p', { class: 'note' }, 'Всё в порядке: расхождений и недоставленных уведомлений нет.')),
+        : h('p', { class: 'note' }, 'Всё в порядке: расхождений, ручных выплат и недоставленных уведомлений нет.')),
   ].filter(Boolean)); // replaceChildren превратил бы null в текст «null»
 }
 
@@ -430,24 +434,27 @@ function newAccountForm() {
 // ---------- платежи ----------
 
 async function viewPayments(main) {
-  const f = state.cache.payFilter || (state.cache.payFilter = { status: '', player: '' });
-  const qs = new URLSearchParams({ limit: '100', ...(f.status ? { status: f.status } : {}), ...(f.player ? { player: f.player } : {}) });
+  const f = state.cache.payFilter || (state.cache.payFilter = { status: '', player: '', type: '' });
+  const qs = new URLSearchParams({ limit: '100', ...(f.status ? { status: f.status } : {}), ...(f.player ? { player: f.player } : {}), ...(f.type ? { type: f.type } : {}) });
   const rows = await api('GET', `/admin/v1/transactions?${qs}`);
   const detail = h('div', { id: 'tx-detail' });
 
   const filter = h('form', { class: 'row start', onsubmit: (e) => { e.preventDefault(); Object.assign(f, formValues(e.target)); renderShell(); } },
+    h('select', { name: 'type', style: 'width:auto', 'aria-label': 'Тип' },
+      [['', 'Все'], ['deposit', 'Депозиты'], ['payout', 'Выплаты']].map(([v, t]) => h('option', { value: v, selected: f.type === v }, t))),
     h('select', { name: 'status', style: 'width:auto', 'aria-label': 'Статус' },
       [['', 'Все статусы'], ['pending', 'Ожидают'], ['success', 'Успешные'], ['declined', 'Отказы']].map(([v, t]) => h('option', { value: v, selected: f.status === v }, t))),
     h('input', { name: 'player', placeholder: 'ID игрока', value: f.player, style: 'width:180px', 'aria-label': 'ID игрока' }),
     h('button', { type: 'submit' }, 'Показать'));
 
   const table = h('table', null,
-    h('thead', null, h('tr', null, ['Время', 'Сайт', 'Игрок', 'Сумма', 'Статус', 'Аккаунт', 'Попыток'].map((t) => h('th', null, t)))),
+    h('thead', null, h('tr', null, ['Время', 'Сайт', 'Игрок', 'Сумма', 'Статус', 'Аккаунт', 'Частей'].map((t) => h('th', null, t)))),
     h('tbody', null, rows.length ? rows.map((t) => h('tr', { class: `click ${state.cache.selTx === t.id ? 'sel' : ''}`, tabindex: 0,
       onclick: () => { state.cache.selTx = t.id; showTx(detail, t.id); main.querySelectorAll('tr.sel').forEach((r) => r.classList.remove('sel')); },
       onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
       h('td', { class: 'n' }, when(t.created_at)), h('td', null, t.site), h('td', { class: 'n' }, `${t.player} · ${t.country}`),
-      h('td', { class: 'n' }, money(t.amount, t.currency)),
+      h('td', { class: 'n' }, t.type === 'payout' ? h('span', { class: 'out' }, '−', money(t.amount, t.currency)) : money(t.amount, t.currency),
+        h('div', { class: 'note' }, t.type === 'payout' ? 'выплата' : 'депозит')),
       h('td', null, pill(t.status), t.decline_code ? h('div', { class: 'note' }, DECLINE[t.decline_code] || t.decline_code) : null),
       h('td', { class: 'dim' }, t.account || '—'), h('td', { class: 'n' }, t.attempts)))
       : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
@@ -468,10 +475,18 @@ async function showTx(box, id) {
       h('span', null, 'ID'), h('span', null, t.id), h('span', null, 'Сайт'), h('span', null, t.site),
       h('span', null, 'Игрок'), h('span', null, `${t.player} · ${t.country}`), h('span', null, 'Создан'), h('span', null, when(t.created_at)),
       t.decline_code ? [h('span', null, 'Причина отказа'), h('span', null, DECLINE[t.decline_code] || t.decline_code)] : null),
+    ...(t.type === 'payout' ? [
+      h('h2', null, 'Части выплаты'),
+      t.legs.length ? h('ol', { class: 'steps' }, t.legs.map((l) => h('li', null,
+        h('div', null, h('b', null, l.kind === 'refund' ? `Возврат на карту · ${l.account || ''}` : 'Ручная выплата'), ' ', money(l.amount, t.currency), ' ', pill(l.status)),
+        l.error ? h('div', { class: 'reason' }, l.error) : null,
+        l.note ? h('div', { class: 'reason' }, l.note, l.completed_by ? ` — ${l.completed_by}` : '') : null)))
+        : h('p', { class: 'note' }, 'Выплата отклонена до раскладки.'),
+    ] : [
     h('h2', null, 'Попытки'),
     t.attempts.length ? h('ol', { class: 'steps' }, t.attempts.map((a) => h('li', null,
       h('div', null, h('b', null, a.account), ' ', pill(a.status), a.error ? h('span', { class: 'note' }, ` · ${a.error}`) : null),
-      h('div', { class: 'reason' }, a.route_reason)))) : h('p', { class: 'note' }, 'Платёж отклонён до выбора аккаунта.'),
+      h('div', { class: 'reason' }, a.route_reason)))) : h('p', { class: 'note' }, 'Платёж отклонён до выбора аккаунта.')]),
     h('h2', null, 'Проводки'),
     t.ledger.length ? h('table', null, h('tbody', null, t.ledger.map((l) => h('tr', null, h('td', { class: 'dim' }, l.account), h('td', { class: 'n' }, money(l.amount, l.currency))))))
       : h('p', { class: 'note' }, 'Проводок нет: деньги ещё не поступили.'),
@@ -523,7 +538,51 @@ function viewSandbox(main) {
       sb.made.unshift(data); renderMade();
       return h('pre', { class: 'json' }, JSON.stringify(data, null, 2));
     }),
-    h('h2', null, 'Созданные'), made));
+    h('h2', null, 'Созданные'), made,
+    h('h2', null, 'Тестовая выплата'),
+    h('p', { class: 'note' }, 'POST /v1/payouts тем же ключом сайта. Сначала деньги возвращаются на карты депозитов игрока, остаток — ручная выплата во вкладке «Выплаты».'),
+    actionForm({ class: 'form' }, [
+      field('Сумма', h('input', { name: 'amount', required: true, value: '10.00', inputmode: 'decimal' })),
+      field('Валюта', h('input', { name: 'currency', required: true, value: 'EUR', maxlength: 3 })),
+      field('ID игрока', h('input', { name: 'player', required: true, value: 'demo-player-1' })),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать выплату')),
+    ], async (v) => {
+      if (!sb.key) throw new Error('Сначала вставь API-ключ сайта в форму депозита выше');
+      const amount = toCents(v.amount);
+      if (!amount) throw new Error('Сумма — число больше нуля');
+      const res = await fetch('/v1/payouts', { method: 'POST', headers: {
+        'content-type': 'application/json', authorization: `Bearer ${sb.key}`, 'idempotency-key': `sandbox-${crypto.randomUUID()}` },
+        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), player: { id: v.player.trim() } }) });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) { const e = new Error(data?.error?.message || `Ошибка ${res.status}`); e.details = data?.error?.details; throw e; }
+      return h('div', { class: `msg ${data.status === 'declined' ? 'err' : 'ok'}` },
+        data.status === 'declined' ? `Отказ: ${DECLINE[data.declineCode] || data.declineCode}`
+          : `Возврат на карты: ${money(data.refundAmount, data.currency)} · ручная выплата: ${money(data.manualAmount, data.currency)} · статус: ${STATUS[data.status]?.[1] || data.status}`);
+    })));
+}
+
+// ---------- ручные выплаты ----------
+
+async function viewManual(main) {
+  const all = !!state.cache.manualAll;
+  const rows = await api('GET', `/admin/v1/manual-payouts${all ? '?all=true' : ''}`);
+  main.replaceChildren(h('section', { class: 'panel' },
+    h('div', { class: 'row' }, h('h2', null, 'Ручные выплаты'),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.manualAll = e.target.checked; renderShell(); } }), 'Показать выполненные')),
+    h('p', { class: 'note' }, 'Выигрыш сверх депозитов игрока нельзя вернуть на карту — его выплачивает оператор сам (перевод на счёт или карту игрока). Переведи деньги, затем отметь выплату здесь: сайт получит уведомление, что выплата завершена.'),
+    rows.length ? h('div', { class: 'tbl' }, h('table', null,
+      h('thead', null, h('tr', null, ['Когда', 'Сайт', 'Игрок', 'К выплате', 'Из выплаты', 'Статус'].map((t) => h('th', null, t)))),
+      h('tbody', null, rows.map((r) => h('tr', null,
+        h('td', { class: 'n' }, when(r.created_at)), h('td', null, r.site), h('td', { class: 'n' }, `${r.player} · ${r.country}`),
+        h('td', { class: 'n' }, h('b', null, money(r.amount, r.currency))),
+        h('td', { class: 'n dim' }, h('button', { class: 'link', onclick: () => { state.cache.selTx = r.payout_id; state.tab = 'payments'; location.hash = 'payments'; renderShell(); } }, money(r.payout_amount, r.currency))),
+        h('td', null, r.status === 'success'
+          ? h('div', null, h('span', { class: 'pill ok' }, 'выплачено'), h('div', { class: 'note' }, `${r.completed_by || ''}: ${r.note || ''}`))
+          : can('operator') ? actionForm({ class: 'row start' }, [
+            h('input', { name: 'note', required: true, minlength: 3, placeholder: 'Как выплатили (№ перевода)', style: 'width:220px' }),
+            h('button', { class: 'sm primary', type: 'submit' }, 'Выплачено'),
+          ], async (v) => { await api('POST', `/admin/v1/manual-payouts/${r.id}/complete`, v); renderShell(); })
+          : h('span', { class: 'pill warn' }, 'ждёт'))))))) : h('p', { class: 'note' }, all ? 'Ручных выплат не было.' : 'Нет выплат, ожидающих оператора.')));
 }
 
 // ---------- расхождения ----------
@@ -531,7 +590,7 @@ function viewSandbox(main) {
 async function viewIssues(main) {
   const all = !!state.cache.issuesAll;
   const rows = await api('GET', `/admin/v1/issues${all ? '?all=true' : ''}`);
-  const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером', amount_mismatch: 'Оплачена не та сумма' };
+  const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером', amount_mismatch: 'Оплачена не та сумма', refund_unknown: 'Нет ответа провайдера при возврате' };
   main.replaceChildren(h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Проблемы с платежами'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.issuesAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),
@@ -689,7 +748,7 @@ async function viewAudit(main) {
     'site.update': 'Изменён сайт', 'site.rotate_key': 'Перевыпущен ключ сайта', 'site.rotate_webhook_secret': 'Перевыпущен секрет вебхуков',
     'operator.create': 'Создан оператор', 'operator.update': 'Изменён оператор', 'provider.create': 'Добавлен провайдер',
     'user.create': 'Создан пользователь', 'user.create_cli': 'Создан пользователь (консоль)', 'user.update': 'Изменён пользователь',
-    'user.reset_2fa': 'Сброшена 2FA', 'issue.resolve': 'Закрыто расхождение',
+    'user.reset_2fa': 'Сброшена 2FA', 'issue.resolve': 'Закрыто расхождение', 'payout.manual_complete': 'Отмечена ручная выплата',
   };
   const diff = (b, a) => {
     if (!b || !a) return a && !b ? h('span', { class: 'note' }, 'создано') : null;
@@ -707,7 +766,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);

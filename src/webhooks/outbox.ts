@@ -11,7 +11,8 @@ import type { TransactionView } from '../routing/router.js';
  * Доставка «как минимум один раз»: сайт должен быть готов к повторам (по id события).
  */
 
-export type SiteEvent = 'deposit.succeeded' | 'deposit.declined' | 'deposit.payment_url_changed';
+export type SiteEvent = 'deposit.succeeded' | 'deposit.declined' | 'deposit.payment_url_changed'
+  | 'payout.succeeded' | 'payout.declined' | 'payout.requires_manual';
 
 export const SIGNATURE_HEADER = 'ftech-signature';
 export const MAX_DELIVERY_ATTEMPTS = 12;

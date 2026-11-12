@@ -64,7 +64,7 @@ export async function depositRoutes(app: FastifyInstance, deps: PaymentDeps) {
   app.get<{ Params: { id: string } }>('/v1/deposits/:id', async (req, reply) => {
     const id = z.string().uuid().safeParse(req.params.id);
     const tx = id.success ? await getTransaction(pool, req.site!.siteId, id.data) : null;
-    if (!tx) return reply.code(404).send({ error: { code: 'not_found', message: 'Платёж не найден' } });
+    if (!tx || tx.type !== 'deposit') return reply.code(404).send({ error: { code: 'not_found', message: 'Платёж не найден' } });
     return serializeTx(tx);
   });
 }

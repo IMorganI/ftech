@@ -5,6 +5,7 @@ import { generateApiKey } from '../auth.js';
 import { encrypt, randomSecret } from '../crypto.js';
 import { requireAdmin, audit, bigintReplacer, type AdminDeps } from './auth.js';
 import { hashPassword, temporaryPassword } from './security.js';
+import { completeManualLeg } from '../payouts/payouts.js';
 
 /*
  * API админки: /admin/v1/*
@@ -51,6 +52,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
         (SELECT count(*) FROM transactions WHERE status = 'pending')::int AS pending,
         (SELECT count(*) FROM reconciliation_issues WHERE NOT resolved)::int AS open_issues,
         (SELECT count(*) FROM webhook_deliveries WHERE status = 'failed')::int AS failed_webhooks,
+        (SELECT count(*) FROM payout_legs WHERE kind = 'manual' AND status = 'pending')::int AS manual_payouts,
         (SELECT coalesce(json_object_agg(currency, total), '{}') FROM (
            SELECT currency, sum(amount)::text AS total FROM transactions
            WHERE status = 'success' AND created_at > now() - interval '24 hours' GROUP BY currency) v) AS volume_24h`)).rows[0];
@@ -125,9 +127,15 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
            FROM transactions t JOIN sites s ON s.id = t.site_id JOIN players p ON p.id = t.player_id
            WHERE t.type = 'deposit' ORDER BY t.created_at DESC LIMIT 8`)).rows;
 
+        const payouts = (await c.query(
+          `SELECT currency, count(*) FILTER (WHERE status = 'success')::int AS succeeded,
+             count(*) FILTER (WHERE status = 'pending')::int AS pending,
+             coalesce(sum(amount) FILTER (WHERE status = 'success'), 0) AS paid_out
+           FROM transactions WHERE type = 'payout' AND created_at >= $1 GROUP BY currency`, [from])).rows;
+
         const fees = (await c.query(`SELECT min(platform_fee_bps) AS min, max(platform_fee_bps) AS max FROM operators`)).rows[0];
 
-        return plain({ period: q.period, unit, tz, from, totals, series, bySite, recent, platformFeeBps: fees });
+        return plain({ period: q.period, unit, tz, from, totals, payouts, series, bySite, recent, platformFeeBps: fees });
     });
   });
 
@@ -336,6 +344,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   app.get('/admin/v1/transactions', viewer, async (req, reply) => {
     const q = parse(z.object({
       status: z.enum(['created', 'pending', 'success', 'declined', 'failed']).optional(),
+      type: z.enum(['deposit', 'payout']).optional(),
       siteId: uuid.optional(), accountId: uuid.optional(), player: z.string().max(128).optional(),
       before: z.string().datetime().optional(), limit: z.coerce.number().int().min(1).max(200).default(50),
     }), req.query, reply);
@@ -343,14 +352,15 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
     const rows = (await pool.query(
       `SELECT t.id, t.type, t.status, t.amount, t.currency, t.decline_code, t.created_at, t.updated_at,
               s.name AS site, p.external_id AS player, p.country, m.name AS account,
-              (SELECT count(*) FROM transaction_attempts a WHERE a.transaction_id = t.id)::int AS attempts
+              (SELECT count(*) FROM transaction_attempts a WHERE a.transaction_id = t.id)::int
+                + (SELECT count(*) FROM payout_legs l WHERE l.payout_id = t.id)::int AS attempts
        FROM transactions t JOIN sites s ON s.id = t.site_id JOIN players p ON p.id = t.player_id
        LEFT JOIN merchant_accounts m ON m.id = t.merchant_account_id
        WHERE ($1::tx_status IS NULL OR t.status = $1) AND ($2::uuid IS NULL OR t.site_id = $2)
          AND ($3::uuid IS NULL OR t.merchant_account_id = $3) AND ($4::text IS NULL OR p.external_id = $4)
-         AND ($5::timestamptz IS NULL OR t.created_at < $5)
+         AND ($5::timestamptz IS NULL OR t.created_at < $5) AND ($7::tx_type IS NULL OR t.type = $7)
        ORDER BY t.created_at DESC LIMIT $6`,
-      [q.status ?? null, q.siteId ?? null, q.accountId ?? null, q.player ?? null, q.before ?? null, q.limit])).rows;
+      [q.status ?? null, q.siteId ?? null, q.accountId ?? null, q.player ?? null, q.before ?? null, q.limit, q.type ?? null])).rows;
     return plain(rows);
   });
 
@@ -366,9 +376,36 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
        FROM transaction_attempts a JOIN merchant_accounts m ON m.id = a.merchant_account_id
        WHERE a.transaction_id = $1 ORDER BY a.attempt_no`, [id.data])).rows;
     const ledger = (await pool.query(`SELECT account, amount, currency, created_at FROM ledger_entries WHERE transaction_id = $1 ORDER BY id`, [id.data])).rows;
+    const legs = (await pool.query(
+      `SELECT l.id, l.kind, l.amount, l.status, l.error, l.note, l.provider_ref, l.completed_at, m.name AS account, u.email AS completed_by
+       FROM payout_legs l LEFT JOIN merchant_accounts m ON m.id = l.merchant_account_id LEFT JOIN admin_users u ON u.id = l.completed_by
+       WHERE l.payout_id = $1 ORDER BY l.kind, l.created_at`, [id.data])).rows;
     const webhooks = (await pool.query(
       `SELECT event, status, attempts, last_error, created_at, delivered_at FROM webhook_deliveries WHERE transaction_id = $1 ORDER BY id`, [id.data])).rows;
-    return plain({ ...tx, attempts, ledger, webhooks });
+    return plain({ ...tx, attempts, legs, ledger, webhooks });
+  });
+
+  // ---------- ручные выплаты ----------
+
+  app.get('/admin/v1/manual-payouts', viewer, async (req) => {
+    const all = (req.query as { all?: string }).all === 'true';
+    return plain((await pool.query(
+      `SELECT l.id, l.amount, l.status, l.note, l.created_at, l.completed_at, u.email AS completed_by,
+              t.id AS payout_id, t.currency, t.amount AS payout_amount, s.name AS site, p.external_id AS player, p.country
+       FROM payout_legs l JOIN transactions t ON t.id = l.payout_id JOIN sites s ON s.id = t.site_id
+       JOIN players p ON p.id = t.player_id LEFT JOIN admin_users u ON u.id = l.completed_by
+       WHERE l.kind = 'manual' AND ($1 OR l.status = 'pending')
+       ORDER BY l.created_at DESC LIMIT 200`, [all])).rows);
+  });
+
+  app.post<{ Params: { id: string } }>('/admin/v1/manual-payouts/:id/complete', operator, async (req, reply) => {
+    const b = parse(z.object({ note: z.string().min(3).max(500) }), req.body, reply);
+    if (!b) return;
+    if (!uuid.safeParse(req.params.id).success) return fail(reply, 404, 'not_found', 'Ручная выплата не найдена');
+    const tx = await completeManualLeg(pool, req.params.id, req.admin!.userId, b.note);
+    if (!tx) return fail(reply, 404, 'not_found', 'Ожидающая ручная выплата не найдена');
+    await audit(pool, { ...who(req), action: 'payout.manual_complete', entity: 'payout', entityId: tx.id, after: { legId: req.params.id, note: b.note } });
+    return { ok: true, payoutStatus: tx.status };
   });
 
   // ---------- расхождения ----------

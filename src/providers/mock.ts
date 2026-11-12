@@ -3,7 +3,7 @@ import { hmacHex, safeEqualHex } from '../crypto.js';
 import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
-  type ProviderAdapter, type ProviderStatus, type VerifiedWebhook,
+  type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
 } from './types.js';
 
 /*
@@ -24,11 +24,13 @@ export interface MockPayment {
   currency: string;
   returnUrl: string | null;
   status: ProviderStatus;
+  refunded: bigint;
 }
 
 export interface MockOptions {
   instantDeclineRate?: number;
   duplicateWebhookRate?: number;
+  refundDeclineRate?: number;
   random?: () => number;
   /** Адрес, с которого открывается страница оплаты, например https://api.example.com */
   publicBaseUrl: string;
@@ -57,9 +59,19 @@ export class MockProvider {
     const ref = 'mock_' + randomUUID().replace(/-/g, '');
     this.payments.set(ref, {
       ref, accountId: creds.accountId, secret: creds.secret, reference: req.reference,
-      amount: req.amount, currency: req.currency, returnUrl: req.returnUrl, status: 'pending',
+      amount: req.amount, currency: req.currency, returnUrl: req.returnUrl, status: 'pending', refunded: 0n,
     });
     return { kind: 'redirect', providerRef: ref, redirectUrl: `${this.opts.publicBaseUrl}/mock-provider/pay/${ref}` };
+  }
+
+  /** Возврат: только по оплаченному и не больше невозвращённого остатка. */
+  refund(ref: string, amount: bigint): RefundResult {
+    if (this.random() < (this.opts.refundDeclineRate ?? 0)) return { kind: 'declined', reason: 'refund_not_allowed' };
+    const p = this.payments.get(ref);
+    if (!p || p.status !== 'success') return { kind: 'declined', reason: 'payment_not_found' };
+    if (p.refunded + amount > p.amount) return { kind: 'declined', reason: 'amount_exceeds_payment' };
+    p.refunded += amount;
+    return { kind: 'success', refundRef: 'mock_rf_' + randomUUID().slice(0, 8) };
   }
 
   status(ref: string): ProviderStatus {
@@ -105,6 +117,10 @@ export class MockAdapter implements ProviderAdapter {
 
   async getStatus(_creds: AccountCredentials, providerRef: string): Promise<ProviderStatus> {
     return this.provider.status(providerRef);
+  }
+
+  async refund(_creds: AccountCredentials, req: RefundRequest): Promise<RefundResult> {
+    return this.provider.refund(req.providerRef, req.amount);
   }
 
   async paidAmount(_creds: AccountCredentials, providerRef: string): Promise<bigint | null> {
