@@ -55,7 +55,7 @@ describe.skipIf(!url)('База данных', () => {
 
   it('отрицательный оборот аккаунта запрещён', async () => {
     const { acc } = await seed();
-    await expect(pool.query(`INSERT INTO account_usage (merchant_account_id, day, used) VALUES ($1, current_date, -1)`, [acc]))
+    await expect(pool.query(`INSERT INTO account_usage (merchant_account_id, day, currency, used) VALUES ($1, current_date, 'EUR', -1)`, [acc]))
       .rejects.toThrow(/check constraint/);
   });
 

@@ -84,6 +84,7 @@ interface Candidate {
 interface Pick {
   account: Candidate;
   day: string;
+  currency: string;
   reason: string;
 }
 
@@ -231,27 +232,28 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
   if (!cands.length) return null;
 
   // Строки оборота на сегодня: создаём, если их нет, и блокируем в порядке id.
+  // Оборот считается в валюте платежа: разные валюты не складываются.
   await c.query(
-    `INSERT INTO account_usage (merchant_account_id, day)
-     SELECT * FROM unnest($1::uuid[], $2::date[]) ON CONFLICT DO NOTHING`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    `INSERT INTO account_usage (merchant_account_id, day, currency)
+     SELECT k.id, k.day, $3 FROM unnest($1::uuid[], $2::date[]) AS k(id, day) ON CONFLICT DO NOTHING`,
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   );
   const usage = new Map<string, { used: bigint; reserved: bigint }>();
   for (const r of (await c.query(
     `SELECT u.merchant_account_id AS id, u.used, u.reserved
      FROM account_usage u JOIN unnest($1::uuid[], $2::date[]) AS k(id, day)
-       ON u.merchant_account_id = k.id AND u.day = k.day
+       ON u.merchant_account_id = k.id AND u.day = k.day AND u.currency = $3
      ORDER BY u.merchant_account_id FOR UPDATE OF u`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   )).rows) usage.set(r.id, { used: r.used, reserved: r.reserved });
 
   const monthly = new Map<string, bigint>();
   for (const r of (await c.query(
     `SELECT u.merchant_account_id AS id, sum(u.used + u.reserved)::bigint AS total
      FROM account_usage u JOIN unnest($1::uuid[], $2::date[]) AS k(id, day)
-       ON u.merchant_account_id = k.id AND u.day >= date_trunc('month', k.day) AND u.day <= k.day
+       ON u.merchant_account_id = k.id AND u.day >= date_trunc('month', k.day) AND u.day <= k.day AND u.currency = $3
      GROUP BY u.merchant_account_id`,
-    [cands.map((a) => a.id), cands.map((a) => a.today)],
+    [cands.map((a) => a.id), cands.map((a) => a.today), inp.currency],
   )).rows) monthly.set(r.id, r.total);
 
   const skipped: string[] = [];
@@ -281,13 +283,13 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
   if (inp.stickyAccountId && best.id !== inp.stickyAccountId) reason += '; прошлый аккаунт игрока недоступен';
   if (skipped.length) reason += `; пропущены: ${skipped.join(', ')}`;
   if (inp.exclude.length) reason += `; каскад после ${inp.exclude.length} отказа(ов)`;
-  return { account: best, day: best.today, reason };
+  return { account: best, day: best.today, currency: inp.currency, reason };
 }
 
 async function reserve(c: Client, pick: Pick, amount: bigint) {
   await c.query(
-    `UPDATE account_usage SET reserved = reserved + $3 WHERE merchant_account_id = $1 AND day = $2`,
-    [pick.account.id, pick.day, amount],
+    `UPDATE account_usage SET reserved = reserved + $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`,
+    [pick.account.id, pick.day, amount, pick.currency],
   );
 }
 
@@ -324,11 +326,11 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
     if (outcome.attemptId && outcome.attemptId !== attempt.id) return toView(tx);
 
     const amount = tx.amount as bigint;
-    const usageArgs = [attempt.merchant_account_id, attempt.usage_day, amount];
+    const usageArgs = [attempt.merchant_account_id, attempt.usage_day, amount, (tx.currency as string).trim()];
 
     if (outcome.status === 'success') {
       await c.query(
-        `UPDATE account_usage SET reserved = reserved - $3, used = used + $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
+        `UPDATE account_usage SET reserved = reserved - $3, used = used + $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`, usageArgs);
       await c.query(`UPDATE transaction_attempts SET status = 'success', provider_ref = coalesce($2, provider_ref) WHERE id = $1`,
         [attempt.id, outcome.providerRef ?? null]);
       await c.query(`UPDATE players SET sticky_account_id = $2, updated_at = now() WHERE id = $1`,
@@ -351,7 +353,7 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
     }
 
     // Отказ провайдера: снимаем резерв и пробуем следующий аккаунт (каскад).
-    await c.query(`UPDATE account_usage SET reserved = reserved - $3 WHERE merchant_account_id = $1 AND day = $2`, usageArgs);
+    await c.query(`UPDATE account_usage SET reserved = reserved - $3 WHERE merchant_account_id = $1 AND day = $2 AND currency = $4`, usageArgs);
     await c.query(`UPDATE transaction_attempts SET status = 'declined', provider_ref = coalesce($2, provider_ref), error = $3 WHERE id = $1`,
       [attempt.id, outcome.providerRef ?? null, outcome.error ?? null]);
 

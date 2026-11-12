@@ -864,7 +864,8 @@ function newConnectionForm(opId, o, connectors) {
     actionForm({ class: 'form', style: 'margin-top:12px' }, [
       field('Провайдер', h('select', { name: 'adapter', required: true }, connectors.map((c) => h('option', { value: c.name }, c.title))), 'wide'),
       field('Название', h('input', { name: 'name', required: true, placeholder: 'Viva · EUR основной' })),
-      field('Валюты', h('input', { name: 'currencies', required: true, value: 'EUR' })),
+      field('Валюта', [h('input', { name: 'currencies', required: true, value: 'EUR', maxlength: 3, pattern: '[A-Za-z]{3}' }),
+        h('span', { class: 'help' }, 'Одна на аккаунт — лимиты считаются в ней. Другая валюта — отдельный аккаунт.')]),
       field('Страны', h('input', { name: 'countries', required: true, value: o.licenses.join(', ') }), 'wide'),
       field('Мин. платёж', h('input', { name: 'min', required: true, value: '10', inputmode: 'decimal' })),
       field('Макс. платёж', h('input', { name: 'max', required: true, value: '2000', inputmode: 'decimal' })),
@@ -875,7 +876,7 @@ function newConnectionForm(opId, o, connectors) {
       const [min, max, cap] = [toCents(v.min), toCents(v.max), toCents(v.cap)];
       if (!min || !max || !cap) throw new Error('Суммы — числа больше нуля');
       const a = await api('POST', '/admin/v1/connections/accounts', { operatorId: opId, adapter: v.adapter, name: v.name,
-        currencies: list(v.currencies), countries: list(v.countries), minAmount: min, maxAmount: max, dailyCap: cap, feeBps: Math.round(Number(v.fee) * 100) });
+        currencies: [v.currencies.trim().toUpperCase()], countries: list(v.countries), minAmount: min, maxAmount: max, dailyCap: cap, feeBps: Math.round(Number(v.fee) * 100) });
       state.cache.openAcc = a.id; state.cache.newAccOpen = false; renderShell();
     }));
 }

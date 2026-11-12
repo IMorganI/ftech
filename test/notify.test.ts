@@ -49,7 +49,7 @@ describe.skipIf(!url)('Уведомления о проблемах', () => {
       VALUES ($1, $2, 'deposit', 5000, 'EUR', 'pending', 'k-notify-1') RETURNING id`, [site, player])).rows[0].id;
     await pool.query(`INSERT INTO reconciliation_issues (transaction_id, kind, details) VALUES ($1, 'late_success', 'У нас declined, у провайдера success')`, [tx]);
     await pool.query(`INSERT INTO webhook_deliveries (site_id, transaction_id, event, payload, status, last_error) VALUES ($1, $2, 'deposit.succeeded', '{}', 'failed', 'HTTP 500')`, [site, tx]);
-    await pool.query(`INSERT INTO account_usage (merchant_account_id, day, used) VALUES ($1, current_date, 96000)`, [acc]);
+    await pool.query(`INSERT INTO account_usage (merchant_account_id, day, currency, used) VALUES ($1, current_date, 'EUR', 96000)`, [acc]);
     await pool.query(`INSERT INTO transaction_attempts (transaction_id, merchant_account_id, status, route_reason, error) VALUES ($1, $2, 'pending', 'r', 'submit_error: ETIMEDOUT')`, [tx, acc]);
   });
 

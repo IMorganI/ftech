@@ -265,7 +265,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
            m.cap_timezone, m.credentials_ref, m.enabled, m.created_at,
            coalesce(u.used, 0) AS used_today, coalesce(u.reserved, 0) AS reserved_today
     FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id
-    LEFT JOIN account_usage u ON u.merchant_account_id = m.id AND u.day = (now() AT TIME ZONE m.cap_timezone)::date`;
+    LEFT JOIN account_usage u ON u.merchant_account_id = m.id AND u.day = (now() AT TIME ZONE m.cap_timezone)::date AND u.currency = m.currencies[1]`;
 
   app.get('/admin/v1/accounts', viewer, async () =>
     plain((await pool.query(`${ACCOUNT_SELECT} ORDER BY m.priority DESC, m.fee_bps, m.name`)).rows));
@@ -276,7 +276,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
     switchAtBps: z.number().int().min(1).max(10000), feeBps: z.number().int().min(0).max(10000), priority: z.number().int().min(-1000).max(1000),
   });
   const adminFields = z.object({
-    name: z.string().min(1).max(200), currencies: z.array(currency).min(1).max(50), countries: z.array(country).min(1).max(250),
+    name: z.string().min(1).max(200), currencies: z.array(currency).length(1, 'Одна валюта на аккаунт: лимиты считаются в ней'), countries: z.array(country).min(1).max(250),
     minAmount: money, maxAmount: money, capTimezone: z.string().min(1).max(64), credentialsRef: z.string().regex(/^[A-Za-z0-9_]{1,64}$/).nullable(),
   });
 

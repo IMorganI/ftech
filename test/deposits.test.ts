@@ -149,9 +149,9 @@ describe.skipIf(!url)('Депозиты и роутинг', () => {
   it('учитывает месячный лимит', async () => {
     const a = await account('A', { cap: 10_000, monthly: 20_000, fee: 100 });
     const b = await account('B', { fee: 200 });
-    await pool.query(`INSERT INTO account_usage (merchant_account_id, day, used)
-      VALUES ($1, (date_trunc('month', now() AT TIME ZONE 'UTC') )::date, 18_500)
-      ON CONFLICT (merchant_account_id, day) DO UPDATE SET used = 18500`, [a]);
+    await pool.query(`INSERT INTO account_usage (merchant_account_id, day, currency, used)
+      VALUES ($1, (date_trunc('month', now() AT TIME ZONE 'UTC') )::date, 'EUR', 18_500)
+      ON CONFLICT (merchant_account_id, day, currency) DO UPDATE SET used = 18500`, [a]);
     // месячный порог 19 000; на сегодня 18 500 уже есть (если сегодня 1-е — это та же строка)
     const res = await deposit(1000);
     expect((await txRow(res.json().id)).merchant_account_id).toBe(b);

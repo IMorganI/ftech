@@ -59,7 +59,7 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
   for (const r of (await pool.query(
     `SELECT * FROM (SELECT 'acc_full:' || m.id || ':' || u.day AS key, m.name, u.used, u.reserved, m.daily_cap, m.switch_at_bps
        FROM merchant_accounts m JOIN account_usage u ON u.merchant_account_id = m.id
-         AND u.day = (now() AT TIME ZONE m.cap_timezone)::date
+         AND u.day = (now() AT TIME ZONE m.cap_timezone)::date AND u.currency = m.currencies[1]
        WHERE m.enabled AND (u.used + u.reserved) * 10000 >= m.daily_cap * m.switch_at_bps) k
      WHERE ${sent} LIMIT 20`)).rows) {
     out.push({ key: r.key, text: `📈 Аккаунт «${r.name}» дошёл до ${r.switch_at_bps / 100}% дневного лимита (${money(r.used)} из ${money(r.daily_cap)}). Новые платежи идут на другие аккаунты.\n${boardUrl}#accounts` });
