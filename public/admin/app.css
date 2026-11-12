@@ -268,3 +268,40 @@ ol.progress li.current { border-color: var(--accent); color: var(--accent); font
 .danger-zone p { margin: 8px 0; }
 .form .full-sm { grid-column: span 2; }
 @media (max-width: 600px) { .form .full-sm { grid-column: 1 / -1; } ol.progress li { font-size: 11px; } }
+
+/* карточка платежа: состояние, что дальше, история */
+.tx-amount { font: 600 22px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.tx-state { border-radius: 8px; padding: 10px 12px; display: grid; gap: 2px; font-size: 13px; }
+.tx-state.ok { background: var(--ok-soft); color: var(--ok); }
+.tx-state.bad { background: var(--bad-soft); color: var(--bad); }
+.tx-state.warn { background: var(--warn-soft); color: var(--warn); }
+.tx-state.info { background: var(--accent-soft); color: var(--accent); }
+.tx-state div { color: var(--ink); opacity: .85; }
+.tx-next { display: grid; gap: 6px; }
+.tx-next li { font-size: 13px; }
+.who { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--track); color: var(--muted); white-space: nowrap; }
+.who.staff { background: var(--warn-soft); color: var(--warn); }
+.who.site { background: var(--accent-soft); color: var(--accent); }
+ol.timeline { list-style: none; margin: 0; padding: 0; display: grid; }
+li.tl { display: grid; grid-template-columns: 74px 14px minmax(0, 1fr); gap: 8px; position: relative; padding-bottom: 12px; }
+li.tl::before { content: ""; position: absolute; left: 88px; top: 14px; bottom: 0; width: 2px; background: var(--line); }
+li.tl:last-child::before { display: none; }
+.tl-time { font: 11px var(--mono); color: var(--muted); text-align: right; padding-top: 2px; display: grid; }
+.tl-day { font-weight: 600; color: var(--ink); }
+.tl-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; background: var(--muted); position: relative; z-index: 1; box-shadow: 0 0 0 3px var(--panel); }
+li.tl.ok .tl-dot { background: var(--ok); } li.tl.bad .tl-dot { background: var(--bad); }
+li.tl.warn .tl-dot { background: var(--warn); } li.tl.info .tl-dot { background: var(--accent); }
+.tl-title { font-size: 13px; font-weight: 500; }
+li.tl.bad .tl-title { color: var(--bad); }
+.tl-actor { color: var(--muted); font-weight: 400; }
+.tl-detail { font-size: 12px; color: var(--muted); word-break: break-word; }
+/* зависшие деньги */
+.kpi.alarm { border-color: var(--bad); background: var(--bad-soft); }
+.kpi.alarm .kpi-value { color: var(--bad); }
+.panel.stuck.bad { border-left: 4px solid var(--bad); }
+.panel.stuck.warn { border-left: 4px solid var(--warn); }
+.panel.stuck h3 .pill { margin-left: 6px; vertical-align: middle; }
+.link-like { color: var(--accent); font-size: 12px; white-space: nowrap; }
+
+.grid2.pay { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); }
+@media (max-width: 1100px) { .grid2.pay { grid-template-columns: minmax(0, 1fr); } }

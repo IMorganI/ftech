@@ -135,7 +135,9 @@ export async function paymentTimeline(pool: Pool, txId: string) {
   }
   for (const a of (await pool.query(
     `SELECT l.action, l.created_at, l.after, u.email FROM audit_log l LEFT JOIN admin_users u ON u.id = l.admin_user_id
-     WHERE l.entity IN ('payout', 'transaction') AND l.entity_id = $1::text ORDER BY l.id`, [txId])).rows) {
+     WHERE l.entity IN ('payout', 'transaction') AND l.entity_id = $1::text
+       AND l.action NOT IN ('payout.manual_approve', 'payout.manual_complete') -- уже показаны в частях выплаты, с именем
+     ORDER BY l.id`, [txId])).rows) {
     push({ at: a.created_at, kind: 'staff', tone: 'info', title: AUDIT[a.action] ?? a.action, actor: a.email });
   }
 

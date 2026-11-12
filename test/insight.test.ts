@@ -121,10 +121,8 @@ describe.skipIf(!url)('История платежа и зависшие ден�
     t = (await paymentTimeline(pool, po.id))!;
     expect(t.state.title).toBe('Выплачено');
     const ev = t.events.map((e) => [e.title, e.actor ?? null]);
-    expect(ev).toEqual(expect.arrayContaining([
-      ['Ручная выплата одобрена', 'a@x.io'], ['Одобрил ручную выплату', 'a@x.io'],
-      ['Ручная выплата выполнена', 'b@x.io'], ['Отметил ручную выплату выполненной', 'b@x.io'],
-    ]));
+    expect(ev).toEqual(expect.arrayContaining([['Ручная выплата одобрена', 'a@x.io'], ['Ручная выплата выполнена', 'b@x.io']]));
+    expect(ev.filter(([title]) => String(title).includes('одобр'))).toHaveLength(1); // без дублей из журнала действий
     expect(t.events.find((e) => e.title === 'Ручная выплата выполнена')!.detail).toContain('№ SEPA-9');
     expect(t.events.filter((e) => e.kind === 'ledger').every((e) => e.tone === 'ok')).toBe(true);
     expect((await cat('manual_payouts')).count).toBe(0);
