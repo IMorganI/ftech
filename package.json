@@ -16,7 +16,9 @@
     "test": "vitest run",
     "seed": "tsx src/db/seed.ts",
     "admin:create": "tsx src/admin/create-user.ts",
-    "demo": "bash .devcontainer/start.sh --foreground"
+    "demo": "bash .devcontainer/start.sh --foreground",
+    "up": "bash scripts/up.sh",
+    "telegram:setup": "tsx src/notify/setup-telegram.ts"
   },
   "dependencies": {
     "@fastify/cookie": "11.1.5",

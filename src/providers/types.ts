@@ -42,6 +42,8 @@ export interface ProviderAdapter {
    *  Не прошёл проверку — InvalidWebhookError. */
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string,
     query?: Record<string, unknown>): VerifiedWebhook;
+  /** Сколько фактически оплачено (в минорных единицах), если провайдер это сообщает. null — неизвестно. */
+  paidAmount?(creds: AccountCredentials, providerRef: string): Promise<bigint | null>;
   /** Если провайдер проверяет адрес вебхука GET-запросом (как Viva) — что ему ответить. */
   webhookChallenge?(creds: AccountCredentials, query: Record<string, unknown>): Promise<unknown>;
 }
