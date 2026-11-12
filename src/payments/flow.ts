@@ -4,7 +4,7 @@ import type { SecretStore } from '../secrets.js';
 import { InvalidWebhookError, type ProviderRegistry, type AccountCredentials, type ProviderAdapter } from '../providers/types.js';
 import { resolveAttempt, getTransactionById, type TransactionView } from '../routing/router.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
-import { accountCredentials } from '../providers/credentials.js';
+import { accountCredentials, ensureWebhookToken, sameToken } from '../providers/credentials.js';
 
 /*
  * Связь роутера с провайдерами.
@@ -104,47 +104,101 @@ export async function submitPending(d: PaymentDeps, txId: string): Promise<Trans
   return tx;
 }
 
-/** GET-проверка адреса вебхука провайдером (Viva при настройке). Нет такой у адаптера — null. */
-export async function providerWebhookChallenge(d: PaymentDeps, accountId: string, query: Record<string, unknown>): Promise<unknown | null> {
+type WebhookOutcome = 'accepted' | 'test' | 'duplicate' | 'rejected' | 'error' | 'challenge';
+
+/** Журнал входящих вебхуков: что пришло и что мы с этим сделали. Ошибка записи не мешает обработке. */
+async function logWebhook(d: PaymentDeps, accountId: string, method: string, outcome: WebhookOutcome,
+  extra: { reason?: string; eventId?: string; providerRef?: string; ip?: string } = {}): Promise<void> {
+  await d.pool.query(
+    `INSERT INTO provider_webhook_log (merchant_account_id, method, outcome, reason, event_id, provider_ref, ip)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [accountId, method, outcome, extra.reason?.slice(0, 300) ?? null, extra.eventId?.slice(0, 200) ?? null,
+     extra.providerRef?.slice(0, 200) ?? null, extra.ip ?? null]).catch(() => {});
+}
+
+interface WebhookAccount { id: string; adapter: string; adapterImpl: ProviderAdapter }
+
+/** Аккаунт и проверка токена в адресе (для всех провайдеров, кроме внутреннего тестового). */
+async function webhookAccount(d: PaymentDeps, accountId: string, method: string, query: Record<string, unknown>, ip?: string): Promise<WebhookAccount> {
   const acc = (await d.pool.query(
-    `SELECT m.id, m.credentials_ref, p.adapter FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id WHERE m.id = $1`,
-    [accountId])).rows[0];
+    `SELECT m.id, p.adapter FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id WHERE m.id = $1`, [accountId])).rows[0];
   if (!acc) throw new InvalidWebhookError('Аккаунт не найден');
-  const adapter = d.providers.get(acc.adapter);
-  if (!adapter.webhookChallenge) return null;
-  return adapter.webhookChallenge(await credsFor(d, acc.id, acc.credentials_ref), query);
+  const adapterImpl = d.providers.get(acc.adapter);
+  if (adapterImpl.manifest.webhook.scheme !== 'internal') {
+    const token = await ensureWebhookToken(d, acc.id);
+    if (!sameToken(query.token, token)) {
+      const reason = query.token ? 'Неверный токен в адресе — у провайдера указан старый или чужой адрес вебхука'
+        : 'В адресе нет токена — скопируй адрес вебхука из борды целиком';
+      await logWebhook(d, acc.id, method, 'rejected', { reason, ip });
+      throw new InvalidWebhookError(reason);
+    }
+  }
+  return { id: acc.id, adapter: acc.adapter, adapterImpl };
+}
+
+/** GET-проверка адреса вебхука провайдером (Viva при настройке). Нет такой у адаптера — null. */
+export async function providerWebhookChallenge(d: PaymentDeps, accountId: string, query: Record<string, unknown>, ip?: string): Promise<unknown | null> {
+  const acc = await webhookAccount(d, accountId, 'GET', query, ip);
+  if (!acc.adapterImpl.webhookChallenge) return null;
+  try {
+    const body = await acc.adapterImpl.webhookChallenge(await credsFor(d, acc.id), query);
+    await logWebhook(d, acc.id, 'GET', 'challenge', { reason: 'Провайдер проверил адрес — ответили', ip });
+    return body;
+  } catch (err) {
+    await logWebhook(d, acc.id, 'GET', 'error', { reason: `Проверка адреса не удалась: ${(err as Error).message}`, ip });
+    throw err;
+  }
 }
 
 const formatCents = (c: bigint) => `${c / 100n}.${(c % 100n).toString().padStart(2, '0')}`;
 
-export type WebhookResult = 'processed' | 'duplicate' | 'unknown_payment' | 'still_pending' | 'issue_recorded';
+export type WebhookResult = 'processed' | 'duplicate' | 'unknown_payment' | 'still_pending' | 'issue_recorded' | 'test';
 
 /**
- * Входящий вебхук провайдера. Подпись проверяет адаптер; статус берём не из тела вебхука,
- * а запросом к провайдеру — поддельный «оплачено» без реальной оплаты ничего не даст.
+ * Входящий вебхук провайдера. Токен адреса проверяет ядро, подпись — адаптер; статус берём не из тела
+ * вебхука, а запросом к провайдеру — поддельный «оплачено» без реальной оплаты ничего не даст.
+ * Каждая попытка пишется в журнал вебхуков аккаунта.
  */
 export async function handleProviderWebhook(
   d: PaymentDeps, accountId: string, headers: Record<string, string | string[] | undefined>, rawBody: string,
-  query: Record<string, unknown> = {},
+  query: Record<string, unknown> = {}, ip?: string,
 ): Promise<WebhookResult> {
-  const acc = (await d.pool.query(
-    `SELECT m.id, m.credentials_ref, p.adapter FROM merchant_accounts m JOIN providers p ON p.id = m.provider_id WHERE m.id = $1`,
-    [accountId],
-  )).rows[0];
-  if (!acc) throw new InvalidWebhookError('Аккаунт не найден');
-  const adapter = d.providers.get(acc.adapter);
-  const creds = await credsFor(d, acc.id, acc.credentials_ref);
-  const hook = adapter.verifyWebhook(creds, headers, rawBody, query); // бросит InvalidWebhookError
+  const acc = await webhookAccount(d, accountId, 'POST', query, ip);
+  const adapter = acc.adapterImpl;
+  let creds: AccountCredentials;
+  try { creds = await credsFor(d, acc.id); } catch (err) {
+    await logWebhook(d, acc.id, 'POST', 'rejected', { reason: (err as Error).message, ip });
+    throw new InvalidWebhookError((err as Error).message);
+  }
+  let hook;
+  try { hook = adapter.verifyWebhook(creds, headers, rawBody, query); } catch (err) {
+    await logWebhook(d, acc.id, 'POST', err instanceof InvalidWebhookError ? 'rejected' : 'error', { reason: (err as Error).message, ip });
+    throw err;
+  }
+  if (hook.test) {
+    await logWebhook(d, acc.id, 'POST', 'test', { reason: 'Тестовое событие: адрес и подпись в порядке', eventId: hook.eventId, ip });
+    return 'test';
+  }
 
   const fresh = (await d.pool.query(
     `INSERT INTO provider_webhook_events (merchant_account_id, event_id, provider_ref, body)
      VALUES ($1, $2, $3, $4) ON CONFLICT (merchant_account_id, event_id) DO NOTHING RETURNING id`,
     [acc.id, hook.eventId, hook.providerRef, rawBody],
   )).rows[0];
-  if (!fresh) return 'duplicate';
-
-  const result = await applyProviderStatus(d, adapter, creds, acc.id, hook.providerRef);
+  const meta = { eventId: hook.eventId, providerRef: hook.providerRef, ip };
+  if (!fresh) {
+    await logWebhook(d, acc.id, 'POST', 'duplicate', { ...meta, reason: 'Повтор уже обработанного события' });
+    return 'duplicate';
+  }
+  let result: WebhookResult;
+  try { result = await applyProviderStatus(d, adapter, creds, acc.id, hook.providerRef); } catch (err) {
+    await logWebhook(d, acc.id, 'POST', 'error', { ...meta, reason: `Не смогли узнать статус у провайдера: ${(err as Error).message}` });
+    throw err;
+  }
   await d.pool.query(`UPDATE provider_webhook_events SET result = $2 WHERE id = $1`, [fresh.id, result]);
+  const RU: Record<string, string> = { processed: 'Статус платежа обновлён', unknown_payment: 'Платёж не наш (нет такого ID)',
+    still_pending: 'У провайдера платёж ещё в процессе', issue_recorded: 'Расхождение — добавлено в «Проблемы»' };
+  await logWebhook(d, acc.id, 'POST', 'accepted', { ...meta, reason: RU[result] ?? result });
   return result;
 }
 

@@ -15,7 +15,7 @@ export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentD
     const id = z.string().uuid().safeParse(req.params.accountId);
     if (!id.success || typeof req.body !== 'string') return reply.code(400).send({ error: { code: 'bad_request', message: 'Неверный запрос' } });
     try {
-      const result = await handleProviderWebhook(deps, id.data, req.headers, req.body, req.query as Record<string, unknown>);
+      const result = await handleProviderWebhook(deps, id.data, req.headers, req.body, req.query as Record<string, unknown>, req.ip);
       return { received: true, result };
     } catch (err) {
       if (err instanceof InvalidWebhookError) {
@@ -31,7 +31,7 @@ export async function providerWebhookRoutes(app: FastifyInstance, deps: PaymentD
     const id = z.string().uuid().safeParse(req.params.accountId);
     if (!id.success) return reply.code(404).send();
     try {
-      const body = await providerWebhookChallenge(deps, id.data, req.query as Record<string, unknown>);
+      const body = await providerWebhookChallenge(deps, id.data, req.query as Record<string, unknown>, req.ip);
       return body === null ? reply.code(404).send() : body;
     } catch (err) {
       if (err instanceof InvalidWebhookError) return reply.code(401).send({ error: { code: 'invalid_token', message: 'Неверный адрес вебхука' } });

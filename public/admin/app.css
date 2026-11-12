@@ -47,7 +47,7 @@ label.check { display: flex; align-items: center; gap: 6px; color: var(--ink); f
 /* каркас: боковое меню + страница */
 body.app { padding: 0; }
 .layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
-.side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 18px;
+.side { position: sticky; top: 0; align-self: start; height: 100vh; display: flex; flex-direction: column; gap: 18px;
   padding: 18px 12px; background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 0 8px; }
 .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; letter-spacing: .01em; }
@@ -230,3 +230,41 @@ table.analytics tfoot td { border-top: 2px solid var(--line); border-bottom: 0; 
 .meter.share i { background: var(--accent); opacity: .6; }
 details.explain summary { font-size: 13px; color: var(--accent); }
 details.explain ul { margin-top: 8px; }
+
+/* подключение аккаунта: карточка провайдера и 4 шага */
+.prov-head { display: grid; gap: 8px; }
+.prov-head p { margin: 0; }
+.tag.yes { background: var(--ok-soft); color: var(--ok); }
+.tag.no { background: var(--track); color: var(--muted); text-decoration: line-through; }
+ol.progress { list-style: none; margin: 4px 0 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; counter-reset: st; }
+ol.progress li { counter-increment: st; font-size: 12px; color: var(--muted); padding-top: 8px; border-top: 3px solid var(--track); }
+ol.progress li::before { content: counter(st) ". "; }
+ol.progress li.done { border-color: var(--ok); color: var(--ok); }
+ol.progress li.done::before { content: "✓ "; }
+ol.progress li.current { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.step { border: 1px solid var(--line); border-radius: 8px; padding: 12px; display: grid; gap: 10px; }
+.step.current { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.step.done { background: var(--bg); }
+.step-head { display: flex; align-items: center; gap: 10px; }
+.step-head h3 { margin: 0; flex: 1; font-size: 14px; }
+.step-n { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font: 600 12px var(--mono); background: var(--track); color: var(--muted); flex: none; }
+.step.current .step-n { background: var(--accent); color: var(--accent-ink); }
+.step.done .step-n { background: var(--ok); color: var(--panel); }
+.step-body { display: grid; gap: 10px; min-width: 0; }
+.step-body p { margin: 0; }
+.hook-url { display: grid; gap: 4px; }
+.secret-step { display: grid; gap: 8px; border: 1px dashed var(--line); border-radius: 8px; padding: 10px; }
+.secret-step b .pill { margin-left: 6px; font-weight: 500; }
+.hook-status { display: grid; grid-template-columns: 14px 1fr; gap: 10px; align-items: start; border-radius: 8px; padding: 10px 12px; }
+.hook-status .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; }
+.hook-status.waiting { background: var(--accent-soft); } .hook-status.waiting .dot { background: var(--accent); }
+.hook-status.ok { background: var(--ok-soft); } .hook-status.ok .dot { background: var(--ok); }
+.hook-status.bad { background: var(--bad-soft); color: var(--bad); } .hook-status.bad .dot { background: var(--bad); }
+@media (prefers-reduced-motion: no-preference) { .hook-status.waiting .dot { animation: pulse 1.4s ease-in-out infinite; } }
+@keyframes pulse { 50% { opacity: .25; } }
+.hook-log summary, .danger-zone summary { font-size: 13px; color: var(--accent); }
+.hook-log table { margin-top: 8px; }
+.danger-zone { font-size: 13px; }
+.danger-zone p { margin: 8px 0; }
+.form .full-sm { grid-column: span 2; }
+@media (max-width: 600px) { .form .full-sm { grid-column: 1 / -1; } ol.progress li { font-size: 11px; } }

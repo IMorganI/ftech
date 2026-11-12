@@ -4,6 +4,8 @@ import type { Pool } from './db/pool.js';
 import type { SecretStore } from './secrets.js';
 import type { ProviderRegistry } from './providers/types.js';
 import type { MockProvider } from './providers/mock.js';
+import type { TestPaySimulator } from './providers/testpay.js';
+import { testPayRoutes } from './routes/testpay.js';
 import { depositRoutes } from './routes/deposits.js';
 import { payoutRoutes } from './routes/payouts.js';
 import { providerWebhookRoutes } from './routes/provider-webhooks.js';
@@ -17,6 +19,8 @@ export interface AppDeps {
   secrets?: SecretStore;
   /** Мок-провайдер со страницей оплаты — только для разработки и тестов. */
   mock?: MockProvider;
+  /** Учебный провайдер TestPay (кабинет и страница оплаты), только в разработке. */
+  testpay?: TestPaySimulator;
   logLevel?: string;
   /** Запросов в минуту на один API-ключ (или IP без ключа). */
   rateLimitPerMinute?: number;
@@ -78,6 +82,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     app.register(providerWebhookRoutes, payment);
 
     if (deps.mock) app.register(mockProviderRoutes, { mock: deps.mock });
+    if (deps.testpay) app.register(testPayRoutes, { sim: deps.testpay });
   }
 
   if (pool && deps.admin) {
