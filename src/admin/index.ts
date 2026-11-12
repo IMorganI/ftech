@@ -3,9 +3,12 @@ import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import { authRoutes, type AdminDeps } from './auth.js';
 import { adminApiRoutes } from './api.js';
+import { connectionRoutes } from './connections.js';
+import type { ProviderRegistry } from '../providers/types.js';
+import type { SecretStore } from '../secrets.js';
 
 /** Всё, что под /admin: вход, сессии, API управления. */
-export async function adminPlugin(app: FastifyInstance, d: AdminDeps) {
+export async function adminPlugin(app: FastifyInstance, d: AdminDeps & { providers?: ProviderRegistry; secrets?: SecretStore; webhookBaseUrl?: string }) {
   await app.register(cookie);
   // Лимит частоты только там, где он задан в маршруте (вход).
   await app.register(rateLimit, {
@@ -29,4 +32,7 @@ export async function adminPlugin(app: FastifyInstance, d: AdminDeps) {
 
   await app.register(authRoutes, d);
   await app.register(adminApiRoutes, d);
+  if (d.providers && d.secrets) {
+    await app.register(connectionRoutes, { ...d, providers: d.providers, secrets: d.secrets, webhookBaseUrl: d.webhookBaseUrl ?? 'http://localhost:3000' });
+  }
 }

@@ -26,7 +26,7 @@ if (config.MOCK_PROVIDER_ENABLED) {
 
 const app = buildApp({
   pool, providers, secrets, mock, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
-  admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://') },
+  admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://'), webhookBaseUrl: config.WEBHOOK_BASE_URL ?? config.PUBLIC_BASE_URL },
   trustProxy: config.TRUST_PROXY,
 });
 
@@ -53,8 +53,8 @@ if (config.WORKERS_ENABLED) {
     const tg = new TelegramSender(config.TELEGRAM_BOT_TOKEN, config.TELEGRAM_CHAT_ID);
     loop('telegram', 30_000, () => notifyOnce(pool, tg, `${config.PUBLIC_BASE_URL}/admin`));
   }
-  loop('payouts', 30_000, () => resumePayouts({ pool, providers, secrets }));
-  loop('reconcile', 20_000, () => reconcilePending({ pool, providers, secrets }, config.RECONCILE_AFTER_SEC));
+  loop('payouts', 30_000, () => resumePayouts({ pool, providers, secrets, encryptionKey }));
+  loop('reconcile', 20_000, () => reconcilePending({ pool, providers, secrets, encryptionKey }, config.RECONCILE_AFTER_SEC));
 }
 
 const shutdown = async () => {

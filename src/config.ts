@@ -4,6 +4,8 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL не задан'),
   ENCRYPTION_KEY: z.string().min(1, 'ENCRYPTION_KEY не задан (openssl rand -base64 32)'),
   PUBLIC_BASE_URL: z.string().url().default('http://localhost:3000'),
+  // Куда провайдеры шлют вебхуки, если не на PUBLIC_BASE_URL (например, адрес туннеля Cloudflare).
+  WEBHOOK_BASE_URL: z.string().url().optional(),
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
   RATE_LIMIT_PER_MINUTE: z.coerce.number().int().positive().default(600),

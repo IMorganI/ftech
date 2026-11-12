@@ -21,6 +21,11 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+/** Заменить содержимое элемента: вложенные массивы раскрываются, null/false пропускаются (иначе DOM напишет «null»). */
+function put(el, ...kids) {
+  el.replaceChildren(...kids.flat(Infinity).filter((k) => k !== null && k !== undefined && k !== false));
+}
+
 async function api(method, path, body) {
   const opts = { method, credentials: 'same-origin', headers: {} };
   if (method !== 'GET') { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(body ?? {}); }
@@ -82,7 +87,7 @@ function actionForm(attrs, children, onSubmit) {
     e.preventDefault();
     const btn = form.querySelector('button[type=submit]');
     btn && (btn.disabled = true);
-    out.replaceChildren();
+    put(out, );
     try { const r = await onSubmit(formValues(form), form); if (r instanceof Node) out.append(r); }
     catch (err) { if (!handleAuthError(err)) out.append(errorBox(err)); }
     finally { btn && (btn.disabled = false); }
@@ -121,7 +126,7 @@ function handleAuthError(err) {
 
 function authScreen(title, ...body) {
   clearInterval(state.timer);
-  root.replaceChildren(h('div', { class: 'auth' }, h('div', { class: 'brand' }, 'ftech · борда'), h('h1', null, title), body));
+  put(root, h('div', { class: 'auth' }, h('div', { class: 'brand' }, 'ftech · борда'), h('h1', null, title), body));
 }
 
 function showLogin(notice) {
@@ -169,9 +174,9 @@ function showChangePassword() {
 // ---------- каркас ----------
 
 const TABS = [
-  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['manual', 'Выплаты', 'viewer'], ['accounts', 'Аккаунты', 'viewer'],
-  ['sandbox', 'Тест-платёж', 'viewer'], ['issues', 'Проблемы', 'viewer'], ['sites', 'Сайты', 'admin'],
-  ['setup', 'Настройки', 'admin'], ['users', 'Команда', 'admin'], ['audit', 'Журнал', 'admin'],
+  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['manual', 'Выплаты', 'viewer'],
+  ['connect', 'Подключения', 'viewer'], ['accounts', 'Лимиты', 'viewer'], ['sandbox', 'Тест-платёж', 'viewer'],
+  ['issues', 'Проблемы', 'viewer'], ['users', 'Команда', 'admin'], ['audit', 'Журнал', 'admin'],
 ];
 
 async function boot() {
@@ -182,7 +187,7 @@ async function boot() {
     if (TABS.some(([id, , role]) => id === fromHash && can(role))) state.tab = fromHash;
     renderShell();
   } catch (err) {
-    if (err.status === 401) showLogin(); else root.replaceChildren(errorBox(err));
+    if (err.status === 401) showLogin(); else put(root, errorBox(err));
   }
 }
 
@@ -191,7 +196,7 @@ function renderShell() {
     TABS.filter(([, , role]) => can(role)).map(([id, label]) =>
       h('button', { class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => { state.tab = id; location.hash = id; renderShell(); } }, label)));
   const main = h('main', { id: 'main' });
-  root.replaceChildren(
+  put(root, 
     h('header', { class: 'top' },
       h('span', { class: 'brand' }, 'ftech'), nav,
       h('div', { class: 'who' }, `${state.me.email} · ${state.me.role}`,
@@ -201,7 +206,7 @@ function renderShell() {
   const view = VIEWS[state.tab];
   const run = async () => {
     try { await view(main); }
-    catch (err) { if (!handleAuthError(err)) main.replaceChildren(errorBox(err)); }
+    catch (err) { if (!handleAuthError(err)) put(main, errorBox(err)); }
   };
   run();
   // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
@@ -277,7 +282,7 @@ async function viewOverview(main) {
 
   const goto = (tab) => () => { state.tab = tab; location.hash = tab; renderShell(); };
 
-  main.replaceChildren(...[
+  put(main, ...[
     attempts === 0 && o.tx_24h === 0 ? h('section', { class: 'panel hint' },
       h('h3', null, 'Здесь пока тихо'),
       h('p', null, 'Как только сайты начнут присылать депозиты, тут появятся цифры. Чтобы посмотреть, как всё работает, проведи тестовый платёж:'),
@@ -296,7 +301,7 @@ async function viewOverview(main) {
         kpi('Оборот', volume, 'сумма успешных депозитов'),
         kpi('Выплачено игрокам', paidOut, payoutsDone ? `${payoutsDone} ${plural(payoutsDone, 'выплата', 'выплаты', 'выплат')}` : 'выплат не было'),
         kpi('Заработали', earned, feePct === null ? null : `комиссия платформы ${feePct}` + (cost.length ? ` · провайдерам ушло ${cost.join(', ')}` : ''), 'money')),
-      feePct === '0%' ? h('div', { class: 'msg warn' }, 'Комиссия платформы не задана — заработок считается как 0. Укажи процент во вкладке «Настройки» у оператора.') : null,
+      feePct === '0%' ? h('div', { class: 'msg warn' }, 'Комиссия платформы не задана — заработок считается как 0. Укажи процент во вкладке «Подключения» у оператора.') : null,
       h('div', { class: 'chart-wrap' }, depositsChart(s.series, s.unit)),
       h('div', { class: 'legend' }, h('span', { class: 'sw ok' }), 'успешные', h('span', { class: 'sw bad' }), 'отказы',
         h('span', { class: 'note' }, s.unit === 'hour' ? ' · по часам' : ' · по дням', ` · время ${s.tz}`))),
@@ -334,12 +339,12 @@ async function viewOverview(main) {
 async function viewAccounts(main) {
   const accounts = await api('GET', '/admin/v1/accounts');
   const active = accounts.filter((a) => a.enabled).length;
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Платёжные аккаунты'), h('span', { class: 'note' }, `${active} из ${accounts.length} включены`)),
     h('p', { class: 'note' }, 'Аккаунты у платёжных провайдеров, между которыми распределяются депозиты. Шкала показывает, сколько дневного лимита уже использовано; черта — порог, после которого платежи уходят на следующий аккаунт.'),
     accounts.length ? h('div', { class: 'accs' }, accounts.map((a) => accountCard(a)))
       : h('p', { class: 'note' }, 'Аккаунтов пока нет.'),
-    can('admin') ? newAccountForm() : null));
+    h('p', { class: 'note' }, 'Подключить новый аккаунт и ввести его ключи — во вкладке «Подключения».')));
 }
 
 function accountCard(a) {
@@ -371,7 +376,7 @@ function accountCard(a) {
     const result = h('div');
     const toggle = h('button', { class: 'sm', onclick: async () => {
       try { await api('PATCH', `/admin/v1/accounts/${a.id}`, { enabled: !a.enabled }); renderShell(); }
-      catch (err) { if (!handleAuthError(err)) result.replaceChildren(errorBox(err)); }
+      catch (err) { if (!handleAuthError(err)) put(result, errorBox(err)); }
     } }, a.enabled ? 'Выключить' : 'Включить');
     const editBtn = h('button', { class: 'sm', onclick: () => {
       state.cache.editing = a.id; clearInterval(state.timer);
@@ -398,37 +403,6 @@ function accountCard(a) {
     card.append(h('div', { class: 'row start' }, toggle, editBtn), result);
   }
   return card;
-}
-
-function newAccountForm() {
-  const opSel = h('select', { name: 'operatorId', required: true });
-  const provSel = h('select', { name: 'providerId', required: true });
-  Promise.all([api('GET', '/admin/v1/operators'), api('GET', '/admin/v1/providers')]).then(([ops, provs]) => {
-    opSel.replaceChildren(...ops.map((o) => h('option', { value: o.id }, o.name)));
-    provSel.replaceChildren(...provs.map((p) => h('option', { value: p.id }, `${p.name} (${p.code})`)));
-  }).catch(() => {});
-  return h('details', { ontoggle: (e) => { state.cache.editing = e.target.open ? 'new' : null; if (e.target.open) clearInterval(state.timer); } },
-    h('summary', null, '+ Новый аккаунт'),
-    actionForm({ class: 'form', style: 'margin-top:12px' }, [
-      field('Оператор', opSel), field('Провайдер', provSel),
-      field('Название', h('input', { name: 'name', required: true, placeholder: 'A · EUR-3' })),
-      field('Валюты', h('input', { name: 'currencies', required: true, placeholder: 'EUR, USD' })),
-      field('Страны', h('input', { name: 'countries', required: true, placeholder: 'MT, DE' }), 'wide'),
-      field('Мин. платёж', h('input', { name: 'min', required: true, value: '10', inputmode: 'decimal' })),
-      field('Макс. платёж', h('input', { name: 'max', required: true, value: '2000', inputmode: 'decimal' })),
-      field('Дневной лимит', h('input', { name: 'cap', required: true, value: '5000', inputmode: 'decimal' })),
-      field('Комиссия, %', h('input', { name: 'fee', type: 'number', value: '2.5', step: 0.01, min: 0 })),
-      field('Ссылка на секрет', h('input', { name: 'credentialsRef', value: 'MOCK', placeholder: 'MOCK' })),
-      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
-    ], async (v) => {
-      const [min, max, cap] = [toCents(v.min), toCents(v.max), toCents(v.cap)];
-      if (!min || !max || !cap) throw new Error('Суммы — числа больше нуля');
-      await api('POST', '/admin/v1/accounts', {
-        operatorId: v.operatorId, providerId: v.providerId, name: v.name, currencies: list(v.currencies), countries: list(v.countries),
-        minAmount: min, maxAmount: max, dailyCap: cap, feeBps: Math.round(Number(v.fee) * 100), credentialsRef: v.credentialsRef.trim() || null,
-      });
-      state.cache.editing = null; renderShell();
-    }));
 }
 
 // ---------- платежи ----------
@@ -459,7 +433,7 @@ async function viewPayments(main) {
       h('td', { class: 'dim' }, t.account || '—'), h('td', { class: 'n' }, t.attempts)))
       : h('tr', null, h('td', { colspan: 7, class: 'dim' }, 'Платежей нет. Создай тестовый во вкладке «Песочница».'))));
 
-  main.replaceChildren(h('div', { class: 'grid2' },
+  put(main, h('div', { class: 'grid2' },
     h('section', { class: 'panel' }, h('div', { class: 'row' }, h('h2', null, 'Платежи'), filter),
       h('p', { class: 'note' }, 'Нажми на платёж, чтобы увидеть, через какие аккаунты он шёл и почему.'), h('div', { class: 'tbl' }, table)),
     h('section', { class: 'panel' }, detail)));
@@ -469,7 +443,7 @@ async function viewPayments(main) {
 
 async function showTx(box, id) {
   const t = await api('GET', `/admin/v1/transactions/${id}`);
-  box.replaceChildren(
+  put(box, 
     h('div', { class: 'row' }, h('h3', null, money(t.amount, t.currency)), pill(t.status)),
     h('div', { class: 'meta' },
       h('span', null, 'ID'), h('span', null, t.id), h('span', null, 'Сайт'), h('span', null, t.site),
@@ -502,7 +476,7 @@ async function showTx(box, id) {
 function viewSandbox(main) {
   const sb = state.cache.sandbox || (state.cache.sandbox = { key: '', made: [] });
   const made = h('div');
-  const renderMade = () => made.replaceChildren(sb.made.length ? h('table', null,
+  const renderMade = () => put(made, sb.made.length ? h('table', null,
     h('thead', null, h('tr', null, ['Платёж', 'Сумма', 'Ответ', ''].map((t) => h('th', null, t)))),
     h('tbody', null, sb.made.map((d) => h('tr', null,
       h('td', { class: 'n' }, d.id.slice(0, 8)), h('td', { class: 'n' }, money(d.amount, d.currency)),
@@ -511,7 +485,7 @@ function viewSandbox(main) {
     : h('p', { class: 'note' }, 'Созданные здесь платежи появятся в этом списке и во вкладке «Платежи».'));
   renderMade();
 
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('h2', null, 'Тестовый платёж'),
     h('p', { class: 'note' }, 'Запрос уходит в тот же публичный API, что используют сайты (POST /v1/deposits), с ключом сайта. Ключ хранится только в этой вкладке до перезагрузки.'),
     actionForm({ class: 'form' }, [
@@ -566,7 +540,7 @@ function viewSandbox(main) {
 async function viewManual(main) {
   const all = !!state.cache.manualAll;
   const rows = await api('GET', `/admin/v1/manual-payouts${all ? '?all=true' : ''}`);
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Ручные выплаты'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.manualAll = e.target.checked; renderShell(); } }), 'Показать выполненные')),
     h('p', { class: 'note' }, 'Выигрыш сверх депозитов игрока нельзя вернуть на карту — его выплачивает оператор сам (перевод на счёт или карту игрока). Переведи деньги, затем отметь выплату здесь: сайт получит уведомление, что выплата завершена.'),
@@ -591,7 +565,7 @@ async function viewIssues(main) {
   const all = !!state.cache.issuesAll;
   const rows = await api('GET', `/admin/v1/issues${all ? '?all=true' : ''}`);
   const KIND = { late_success: 'Оплата по уже закрытой попытке', status_mismatch: 'Статус не совпадает с провайдером', amount_mismatch: 'Оплачена не та сумма', refund_unknown: 'Нет ответа провайдера при возврате' };
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Проблемы с платежами'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.issuesAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),
     h('p', { class: 'note' }, 'Ситуации, которые система не решает сама. Например, провайдер подтвердил оплату по попытке, которую мы уже закрыли отказом: деньги пришли, а платёж ушёл дальше. Проверь у провайдера и реши вручную.'),
@@ -608,97 +582,209 @@ async function viewIssues(main) {
           : h('span', { class: 'pill warn' }, 'открыто'))))))) : h('p', { class: 'note' }, all ? 'Расхождений не было.' : 'Открытых расхождений нет.')));
 }
 
-// ---------- сайты ----------
+// ---------- подключения: операторы → аккаунты и сайты ----------
 
-async function viewSites(main) {
-  const [sites, ops] = await Promise.all([api('GET', '/admin/v1/sites'), api('GET', '/admin/v1/operators')]);
-  const opName = Object.fromEntries(ops.map((o) => [o.id, o.name]));
-  const shown = h('div');
-
-  const siteRow = (s) => {
-    const out = h('div');
-    const confirmRotate = (kind) => {
-      out.replaceChildren(h('div', { class: 'msg err' },
-        kind === 'key' ? 'Старый ключ перестанет работать сразу — сайт получит ошибки, пока не обновит ключ. ' : 'Сайт должен обновить секрет проверки подписи. ',
-        h('button', { class: 'sm danger', onclick: async () => {
-          try {
-            const r = await api('POST', `/admin/v1/sites/${s.id}/rotate-${kind === 'key' ? 'key' : 'webhook-secret'}`);
-            out.replaceChildren(shownOnce(kind === 'key' ? 'Новый API-ключ' : 'Новый секрет вебхуков', [[s.name, r.apiKey || r.webhookSecret]]));
-          } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); }
-        } }, 'Да, перевыпустить'), ' ', h('button', { class: 'sm', onclick: () => out.replaceChildren() }, 'Отмена')));
-    };
-    return [h('tr', null,
-      h('td', null, h('b', null, s.name), h('div', { class: 'note' }, opName[s.operator_id] || '')),
-      h('td', null, actionForm({ class: 'row start' }, [
-        h('input', { name: 'webhookUrl', value: s.webhook_url || '', placeholder: 'https://…/hooks', style: 'width:240px', 'aria-label': 'Адрес вебхука' }),
-        h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
-      ], async (v) => { await api('PATCH', `/admin/v1/sites/${s.id}`, { webhookUrl: v.webhookUrl.trim() || null }); return h('div', { class: 'msg ok' }, 'Сохранено'); })),
-      h('td', null, s.enabled ? h('span', { class: 'pill ok' }, 'работает') : h('span', { class: 'pill m' }, 'отключён')),
-      h('td', null, h('div', { class: 'row start' },
-        h('button', { class: 'sm', onclick: () => confirmRotate('key') }, 'Новый ключ'),
-        h('button', { class: 'sm', onclick: () => confirmRotate('secret') }, 'Новый секрет'),
-        h('button', { class: 'sm', onclick: async () => { try { await api('PATCH', `/admin/v1/sites/${s.id}`, { enabled: !s.enabled }); renderShell(); } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); } } },
-          s.enabled ? 'Отключить' : 'Включить')))),
-      h('tr', null, h('td', { colspan: 4, style: 'border:0;padding:0 8px' }, out))];
-  };
-
-  main.replaceChildren(h('section', { class: 'panel' },
-    h('h2', null, 'Сайты'),
-    h('p', { class: 'note' }, 'Каждый сайт ходит в API со своим ключом. Ключ и секрет подписи вебхуков показываются только при создании или перевыпуске.'),
-    h('div', { class: 'tbl' }, h('table', null,
-      h('thead', null, h('tr', null, ['Сайт', 'Адрес вебхука', 'Статус', 'Ключи'].map((t) => h('th', null, t)))),
-      h('tbody', null, sites.map(siteRow)))),
-    h('h2', null, 'Новый сайт'),
-    actionForm({ class: 'form' }, [
-      field('Оператор', h('select', { name: 'operatorId', required: true }, ops.map((o) => h('option', { value: o.id }, o.name)))),
-      field('Название', h('input', { name: 'name', required: true, placeholder: 'my-casino' })),
-      field('Адрес вебхука', h('input', { name: 'webhookUrl', placeholder: 'https://…/hooks (можно позже)' }), 'wide'),
-      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
-    ], async (v) => {
-      const s = await api('POST', '/admin/v1/sites', { operatorId: v.operatorId, name: v.name, webhookUrl: v.webhookUrl.trim() || null });
-      shown.replaceChildren(shownOnce(`Сайт «${s.name}» создан`, [['API-ключ', s.apiKey], ['Секрет подписи вебхуков', s.webhookSecret]]));
-      return null;
-    }), shown));
+function copyBox(value, label = 'Копировать') {
+  return h('div', { class: 'copybox' },
+    h('code', null, value),
+    h('button', { class: 'sm', type: 'button', onclick: async (e) => {
+      try { await navigator.clipboard.writeText(value); e.target.textContent = 'Скопировано'; }
+      catch { e.target.textContent = 'Выдели и скопируй вручную'; }
+    } }, label));
 }
 
-// ---------- операторы и провайдеры ----------
-
-async function viewSetup(main) {
-  const [ops, provs] = await Promise.all([api('GET', '/admin/v1/operators'), api('GET', '/admin/v1/providers')]);
-  main.replaceChildren(h('div', { class: 'grid2' },
-    h('section', { class: 'panel' },
-      h('h2', null, 'Операторы'),
-      h('p', { class: 'note' }, 'Оператор — владелец лицензии, под которым работают сайты. Комиссия платформы — твой процент с каждого успешного депозита: из неё считается «Заработали» на Обзоре.'),
-      h('div', { class: 'tbl' }, h('table', null, h('thead', null, h('tr', null, ['Название', 'Страны лицензии', 'KYC выше', 'Комиссия платформы'].map((t) => h('th', null, t)))),
-        h('tbody', null, ops.map((o) => h('tr', null, h('td', null, o.name), h('td', null, h('div', { class: 'tags' }, o.licenses.map((c) => h('span', { class: 'tag' }, c)))),
-          h('td', { class: 'n' }, o.kyc_required_above ? money(o.kyc_required_above) : '—'),
-          h('td', null, actionForm({ class: 'row start' }, [
-            h('input', { name: 'fee', type: 'number', min: 0, max: 100, step: 0.01, value: o.platform_fee_bps / 100, style: 'width:80px', 'aria-label': `Комиссия платформы для ${o.name}, %` }),
-            h('span', { class: 'note' }, '%'), h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
-          ], async (v) => {
-            await api('PATCH', `/admin/v1/operators/${o.id}`, { platformFeeBps: Math.round(Number(v.fee) * 100) });
-            return h('div', { class: 'msg ok' }, 'Сохранено. Новый процент применяется к следующим успешным депозитам.');
-          }))))))),
-      actionForm({ class: 'form' }, [
-        field('Название', h('input', { name: 'name', required: true })),
+async function viewConnect(main) {
+  if (state.cache.opId) return viewOperator(main, state.cache.opId);
+  const ops = await api('GET', '/admin/v1/operators');
+  const ready = await Promise.all(ops.map((o) => api('GET', `/admin/v1/operators/${o.id}/readiness`).catch(() => null)));
+  put(main, h('section', { class: 'panel' },
+    h('h2', null, 'Подключения'),
+    h('p', { class: 'note' }, 'Оператор — компания-владелец казино с лицензией. У него свои платёжные аккаунты (куда приходят деньги игроков) и свои сайты, которые подключаются к API. Выбери оператора, чтобы подключить аккаунт или сайт.'),
+    ops.length ? h('div', { class: 'ops' }, ops.map((o, i) => {
+      const r = ready[i]; const req = r ? r.steps.filter((s) => !s.optional) : [];
+      const done = req.filter((s) => s.done).length;
+      return h('button', { class: 'op-card', type: 'button', onclick: () => { state.cache.opId = o.id; renderShell(); } },
+        h('div', { class: 'row' }, h('b', null, o.name), r?.ready ? h('span', { class: 'pill ok' }, 'готов к работе') : h('span', { class: 'pill warn' }, `${done} из ${req.length} шагов`)),
+        h('div', { class: 'tags' }, o.licenses.map((c) => h('span', { class: 'tag' }, c))),
+        h('div', { class: 'note' }, `Комиссия платформы: ${o.platform_fee_bps / 100}%`));
+    })) : h('p', { class: 'note' }, 'Операторов пока нет — добавь первого.'),
+    can('admin') ? h('details', null, h('summary', null, '+ Новый оператор'),
+      actionForm({ class: 'form', style: 'margin-top:12px' }, [
+        field('Название компании', h('input', { name: 'name', required: true, placeholder: 'Lucky Games Ltd' })),
         field('Страны лицензии', h('input', { name: 'licenses', required: true, placeholder: 'MT, DE, IE' })),
+        field('Комиссия платформы, %', h('input', { name: 'fee', type: 'number', min: 0, max: 100, step: 0.01, value: '1.5' })),
         field('KYC обязателен выше', h('input', { name: 'kyc', placeholder: 'например 300', inputmode: 'decimal' })),
         h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Добавить')),
       ], async (v) => {
-        await api('POST', '/admin/v1/operators', { name: v.name, licenses: list(v.licenses), kycRequiredAbove: v.kyc.trim() ? toCents(v.kyc) : null });
-        renderShell();
-      })),
+        const o = await api('POST', '/admin/v1/operators', { name: v.name, licenses: list(v.licenses),
+          platformFeeBps: Math.round(Number(v.fee || 0) * 100), kycRequiredAbove: v.kyc.trim() ? toCents(v.kyc) : null });
+        state.cache.opId = o.id; renderShell();
+      })) : null));
+}
+
+async function viewOperator(main, opId) {
+  const [ops, readiness, accounts, sites, connectors] = await Promise.all([
+    api('GET', '/admin/v1/operators'), api('GET', `/admin/v1/operators/${opId}/readiness`),
+    api('GET', '/admin/v1/accounts'), can('admin') ? api('GET', '/admin/v1/sites') : Promise.resolve([]), api('GET', '/admin/v1/connectors'),
+  ]);
+  const o = ops.find((x) => x.id === opId);
+  if (!o) { state.cache.opId = null; return viewConnect(main); }
+  const accs = accounts.filter((a) => a.operator_id === opId);
+  const mySites = sites.filter((s) => s.operator_id === opId);
+  clearInterval(state.timer); // страница с формами — без автообновления
+  const goto = (tab) => () => { state.tab = tab; location.hash = tab; renderShell(); };
+
+  const checklist = h('ol', { class: 'checklist' }, readiness.steps.map((s) => h('li', { class: s.done ? 'done' : '' },
+    h('span', { class: 'mark', 'aria-hidden': 'true' }, s.done ? '✓' : ''),
+    h('div', null, h('b', null, s.title), s.optional ? h('span', { class: 'note' }, ' · желательно') : null,
+      s.done ? null : h('div', { class: 'note' }, s.hint, s.key === 'deposit' ? [' — ', h('button', { class: 'link', onclick: goto('sandbox') }, 'Тест-платёж')] : null)))));
+
+  const accList = h('div', { class: 'acc-list' }, accs.length ? accs.map((a) => accountConnection(a, connectors, state.cache.openAcc === a.id))
+    : h('p', { class: 'note' }, 'Аккаунтов нет. Подключи первый ниже.'));
+
+  put(main, 
+    h('button', { class: 'link', onclick: () => { state.cache.opId = null; renderShell(); } }, '← Все операторы'),
     h('section', { class: 'panel' },
-      h('h2', null, 'Провайдеры'),
-      h('table', null, h('thead', null, h('tr', null, ['Название', 'Код', 'Адаптер'].map((t) => h('th', null, t)))),
-        h('tbody', null, provs.map((p) => h('tr', null, h('td', null, p.name), h('td', { class: 'n' }, p.code), h('td', { class: 'n' }, p.adapter))))),
-      h('p', { class: 'note' }, 'Адаптер — модуль интеграции в коде сервера. Доступны: viva (Viva Wallet), mock (тестовый).'),
-      actionForm({ class: 'form' }, [
-        field('Название', h('input', { name: 'name', required: true })),
-        field('Код', h('input', { name: 'code', required: true, placeholder: 'viva' })),
-        field('Адаптер', h('input', { name: 'adapter', required: true, value: 'mock' })),
-        h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Добавить')),
-      ], async (v) => { await api('POST', '/admin/v1/providers', v); renderShell(); }))));
+      h('div', { class: 'row' }, h('h1', null, o.name), readiness.ready ? h('span', { class: 'pill ok' }, 'готов принимать платежи') : h('span', { class: 'pill warn' }, 'подключение не завершено')),
+      h('div', { class: 'row start' }, h('span', { class: 'note' }, 'Лицензия:'), h('div', { class: 'tags' }, o.licenses.map((c) => h('span', { class: 'tag' }, c)))),
+      can('admin') ? actionForm({ class: 'row start' }, [
+        h('label', { class: 'check' }, 'Комиссия платформы',
+          h('input', { name: 'fee', type: 'number', min: 0, max: 100, step: 0.01, value: o.platform_fee_bps / 100, style: 'width:90px' }), '%'),
+        h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
+      ], async (v) => { await api('PATCH', `/admin/v1/operators/${opId}`, { platformFeeBps: Math.round(Number(v.fee) * 100) }); renderShell(); }) : null),
+    h('section', { class: 'panel' }, h('h2', null, 'Что нужно для приёма платежей'), checklist),
+    h('section', { class: 'panel' },
+      h('h2', null, 'Платёжные аккаунты'),
+      h('p', { class: 'note' }, 'Аккаунты у провайдеров, куда приходят деньги игроков. Ключи вводятся здесь и хранятся в зашифрованном виде; после сохранения их никто не увидит — только последние 4 символа.'),
+      accList,
+      can('admin') ? newConnectionForm(opId, o, connectors) : null),
+    can('admin') ? sitesBlock(opId, mySites) : null);
+}
+
+function newConnectionForm(opId, o, connectors) {
+  return h('details', { open: state.cache.newAccOpen || null, ontoggle: (e) => { state.cache.newAccOpen = e.target.open; } },
+    h('summary', null, '+ Подключить платёжный аккаунт'),
+    actionForm({ class: 'form', style: 'margin-top:12px' }, [
+      field('Провайдер', h('select', { name: 'adapter', required: true }, connectors.map((c) => h('option', { value: c.name }, c.title))), 'wide'),
+      field('Название', h('input', { name: 'name', required: true, placeholder: 'Viva · EUR основной' })),
+      field('Валюты', h('input', { name: 'currencies', required: true, value: 'EUR' })),
+      field('Страны', h('input', { name: 'countries', required: true, value: o.licenses.join(', ') }), 'wide'),
+      field('Мин. платёж', h('input', { name: 'min', required: true, value: '10', inputmode: 'decimal' })),
+      field('Макс. платёж', h('input', { name: 'max', required: true, value: '2000', inputmode: 'decimal' })),
+      field('Дневной лимит', h('input', { name: 'cap', required: true, value: '10000', inputmode: 'decimal' })),
+      field('Комиссия провайдера, %', h('input', { name: 'fee', type: 'number', value: '1.9', step: 0.01, min: 0 })),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать и перейти к ключам')),
+    ], async (v) => {
+      const [min, max, cap] = [toCents(v.min), toCents(v.max), toCents(v.cap)];
+      if (!min || !max || !cap) throw new Error('Суммы — числа больше нуля');
+      const a = await api('POST', '/admin/v1/connections/accounts', { operatorId: opId, adapter: v.adapter, name: v.name,
+        currencies: list(v.currencies), countries: list(v.countries), minAmount: min, maxAmount: max, dailyCap: cap, feeBps: Math.round(Number(v.fee) * 100) });
+      state.cache.openAcc = a.id; state.cache.newAccOpen = false; renderShell();
+    }));
+}
+
+function accountConnection(a, connectors, open) {
+  const body = h('div', { class: 'conn-body' });
+  const box = h('details', { class: 'conn', open: open || null, ontoggle: (e) => { if (e.target.open) { state.cache.openAcc = a.id; loadConnection(a, body); } } },
+    h('summary', null,
+      h('b', null, a.name), ' ', h('span', { class: 'note' }, connectors.find((c) => c.name === a.provider_code)?.title || a.provider_code),
+      ' ', a.enabled ? null : h('span', { class: 'pill m' }, 'выключен')),
+    body);
+  if (open) loadConnection(a, body);
+  return box;
+}
+
+async function loadConnection(a, body) {
+  put(body, h('p', { class: 'note' }, 'Загрузка…'));
+  let c;
+  try { c = await api('GET', `/admin/v1/accounts/${a.id}/connection`); }
+  catch (err) { if (!handleAuthError(err)) put(body, errorBox(err)); return; }
+  const checkOut = h('div');
+  const renderCheck = (r) => put(checkOut, r ? h('ul', { class: 'checks' }, r.results.map((x) =>
+    h('li', { class: x.ok ? 'ok' : 'bad' }, h('span', { 'aria-hidden': 'true' }, x.ok ? '✓' : '✕'), h('div', null, h('b', null, x.name), h('div', { class: 'note' }, x.message))))) : null);
+  if (c.lastCheck) renderCheck(c.lastCheck);
+
+  const keysForm = c.fields.length ? actionForm({ class: 'form' }, [
+    ...c.fields.map((f) => {
+      const cur = c.values[f.key] || {};
+      const input = f.options
+        ? h('select', { name: f.key }, f.options.map((opt) => h('option', { value: opt, selected: (cur.value || f.default) === opt }, opt)))
+        : h('input', { name: f.key, type: f.secret ? 'password' : 'text', autocomplete: 'off',
+            value: f.secret ? '' : (cur.value || (c.source ? '' : f.default) || ''),
+            placeholder: f.secret && cur.masked ? `${cur.masked} — оставь пустым, чтобы не менять` : (f.placeholder || '') });
+      return field(f.label + (f.required ? '' : ' (необязательно)'), [input, f.help ? h('span', { class: 'help' }, f.help) : null], f.key === 'clientId' ? 'wide' : null);
+    }),
+    h('div', { class: 'full row start' }, can('admin') ? h('button', { class: 'primary', type: 'submit' }, 'Сохранить ключи') : null),
+  ], async (v) => {
+    await api('PUT', `/admin/v1/accounts/${a.id}/credentials`, { values: v });
+    state.cache.openAcc = a.id; renderShell(); // обновить чек-лист готовности
+    return null;
+  }) : h('p', { class: 'note' }, 'Ключи не нужны.');
+
+  put(body, 
+    c.source === 'env' ? h('div', { class: 'msg warn' }, 'Сейчас ключи берутся из настроек сервера (.env). Если сохранишь их здесь — будут использоваться эти.') : null,
+    !c.source && c.fields.length ? h('div', { class: 'msg warn' }, 'Ключи ещё не введены — платежи через этот аккаунт не пройдут.') : null,
+    h('h3', null, '1. Ключи'), keysForm,
+    h('h3', null, '2. Проверка'),
+    h('div', { class: 'row start' }, h('button', { type: 'button', onclick: async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Проверяю…';
+      try { await api('POST', `/admin/v1/accounts/${a.id}/check`); state.cache.openAcc = a.id; renderShell(); return; }
+      catch (err) { if (!handleAuthError(err)) put(checkOut, errorBox(err)); }
+      finally { e.target.disabled = false; e.target.textContent = 'Проверить подключение'; }
+    } }, 'Проверить подключение'),
+      c.lastCheck ? h('span', { class: 'note' }, `последняя проверка: ${when(c.lastCheck.at)}`) : h('span', { class: 'note' }, 'Проверяет ключи у провайдера, платежей не создаёт')),
+    checkOut,
+    c.webhook ? [
+      h('h3', null, '3. Вебхук у провайдера'),
+      h('p', { class: 'note' }, c.webhook.help),
+      copyBox(c.webhook.url, 'Копировать адрес'),
+      h('div', { class: 'note' }, 'События: ', c.webhook.events.join(', ')),
+      h('div', { class: 'note' }, c.webhook.lastReceivedAt ? `✓ Последний вебхук получен ${when(c.webhook.lastReceivedAt)}` : 'Вебхуков ещё не было. Без них статус оплаты обновится сверкой примерно через минуту.'),
+    ] : null);
+}
+
+function sitesBlock(opId, mySites) {
+  const shown = h('div');
+  const rows = mySites.map((s) => {
+    const out = h('div');
+    const rotate = (kind) => put(out, h('div', { class: 'msg err' },
+      kind === 'key' ? 'Старый ключ перестанет работать сразу — сайт получит ошибки, пока не обновит ключ. ' : 'Сайту нужно будет обновить секрет проверки подписи. ',
+      h('button', { class: 'sm danger', onclick: async () => {
+        try {
+          const r = await api('POST', `/admin/v1/sites/${s.id}/rotate-${kind === 'key' ? 'key' : 'webhook-secret'}`);
+          put(out, shownOnce(kind === 'key' ? 'Новый API-ключ' : 'Новый секрет вебхуков', [[s.name, r.apiKey || r.webhookSecret]]));
+        } catch (err) { if (!handleAuthError(err)) put(out, errorBox(err)); }
+      } }, 'Да, перевыпустить'), ' ', h('button', { class: 'sm', onclick: () => put(out, ) }, 'Отмена')));
+    return h('div', { class: 'site-row' },
+      h('div', { class: 'row' }, h('b', null, s.name), s.enabled ? h('span', { class: 'pill ok' }, 'работает') : h('span', { class: 'pill m' }, 'отключён')),
+      actionForm({ class: 'row start' }, [
+        h('input', { name: 'webhookUrl', value: s.webhook_url || '', placeholder: 'Адрес вебхука казино: https://…/hooks', style: 'flex:1;min-width:220px', 'aria-label': 'Адрес вебхука' }),
+        h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
+      ], async (v) => { await api('PATCH', `/admin/v1/sites/${s.id}`, { webhookUrl: v.webhookUrl.trim() || null }); return h('div', { class: 'msg ok' }, 'Сохранено'); }),
+      h('div', { class: 'row start' },
+        h('button', { class: 'sm', onclick: () => rotate('key') }, 'Новый API-ключ'),
+        h('button', { class: 'sm', onclick: () => rotate('secret') }, 'Новый секрет вебхуков'),
+        h('button', { class: 'sm', onclick: async () => { await api('PATCH', `/admin/v1/sites/${s.id}`, { enabled: !s.enabled }).catch(() => {}); renderShell(); } }, s.enabled ? 'Отключить' : 'Включить')),
+      out);
+  });
+  return h('section', { class: 'panel' },
+    h('h2', null, 'Сайты'),
+    h('p', { class: 'note' }, 'Каждый сайт (казино) ходит в наш API со своим ключом. Ключ и секрет подписи вебхуков показываются один раз — сразу передай их разработчикам казино.'),
+    rows.length ? h('div', { class: 'site-list' }, rows) : h('p', { class: 'note' }, 'Сайтов нет.'),
+    h('details', null, h('summary', null, '+ Подключить сайт'),
+      actionForm({ class: 'form', style: 'margin-top:12px' }, [
+        field('Название', h('input', { name: 'name', required: true, placeholder: 'my-casino' })),
+        field('Адрес вебхука казино', h('input', { name: 'webhookUrl', placeholder: 'https://…/hooks (можно позже)' }), 'wide'),
+        h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
+      ], async (v) => {
+        const s = await api('POST', '/admin/v1/sites', { operatorId: opId, name: v.name, webhookUrl: v.webhookUrl.trim() || null });
+        put(shown, shownOnce(`Сайт «${s.name}» создан`, [['API-ключ', s.apiKey], ['Секрет подписи вебхуков', s.webhookSecret]]),
+          h('p', { class: 'note' }, 'Пример первого запроса для разработчиков казино:'),
+          h('pre', { class: 'json' }, `curl -X POST ${location.origin}/v1/deposits \\\n  -H "Authorization: Bearer ${s.apiKey}" \\\n  -H "Idempotency-Key: order-0001" \\\n  -H "Content-Type: application/json" \\\n  -d '{"amount":2500,"currency":"EUR","player":{"id":"u42","country":"${'MT'}","kyc":"verified"}}'`),
+          h('p', { class: 'note' }, 'Полное описание API — docs/API.md в репозитории.'));
+        return null;
+      })),
+    shown);
 }
 
 // ---------- пользователи ----------
@@ -706,7 +792,7 @@ async function viewSetup(main) {
 async function viewUsers(main) {
   const users = await api('GET', '/admin/v1/users');
   const shown = h('div');
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('h2', null, 'Команда'),
     h('p', { class: 'note' }, 'viewer — только смотрит; operator — ещё включает аккаунты, меняет лимиты и разбирает проблемы; admin — всё.'),
     h('div', { class: 'tbl' }, h('table', null,
@@ -714,7 +800,7 @@ async function viewUsers(main) {
       h('tbody', null, users.map((u) => {
         const self = u.id === state.me.id;
         const out = h('span');
-        const act = async (fn) => { try { await fn(); renderShell(); } catch (err) { if (!handleAuthError(err)) out.replaceChildren(errorBox(err)); } };
+        const act = async (fn) => { try { await fn(); renderShell(); } catch (err) { if (!handleAuthError(err)) put(out, errorBox(err)); } };
         return h('tr', null,
           h('td', null, u.email, self ? h('span', { class: 'note' }, ' (вы)') : null,
             u.disabled ? h('div', null, h('span', { class: 'pill m' }, 'заблокирован')) : null, u.locked ? h('div', null, h('span', { class: 'pill warn' }, 'временная блокировка')) : null),
@@ -733,7 +819,7 @@ async function viewUsers(main) {
       h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать')),
     ], async (v) => {
       const u = await api('POST', '/admin/v1/users', v);
-      shown.replaceChildren(shownOnce(`Пользователь ${u.email} создан`, [['Временный пароль (при входе — 2FA и смена пароля)', u.temporaryPassword]]));
+      put(shown, shownOnce(`Пользователь ${u.email} создан`, [['Временный пароль (при входе — 2FA и смена пароля)', u.temporaryPassword]]));
       return null;
     }), shown));
 }
@@ -744,7 +830,7 @@ async function viewAudit(main) {
   const rows = await api('GET', '/admin/v1/audit?limit=200');
   const ACTION = {
     'auth.login': 'Вход', 'auth.totp_enabled': 'Первый вход, включена 2FA', 'auth.password_failed': 'Неверный пароль', 'auth.totp_failed': 'Неверный код 2FA',
-    'auth.password_changed': 'Смена пароля', 'account.update': 'Изменён аккаунт', 'account.create': 'Создан аккаунт', 'site.create': 'Создан сайт',
+    'auth.password_changed': 'Смена пароля', 'account.credentials': 'Изменены ключи аккаунта', 'account.update': 'Изменён аккаунт', 'account.create': 'Создан аккаунт', 'site.create': 'Создан сайт',
     'site.update': 'Изменён сайт', 'site.rotate_key': 'Перевыпущен ключ сайта', 'site.rotate_webhook_secret': 'Перевыпущен секрет вебхуков',
     'operator.create': 'Создан оператор', 'operator.update': 'Изменён оператор', 'provider.create': 'Добавлен провайдер',
     'user.create': 'Создан пользователь', 'user.create_cli': 'Создан пользователь (консоль)', 'user.update': 'Изменён пользователь',
@@ -755,7 +841,7 @@ async function viewAudit(main) {
     const keys = Object.keys(a).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]) && !['used_today', 'reserved_today'].includes(k));
     return keys.length ? h('div', { class: 'diff' }, keys.map((k) => h('div', null, `${k}: `, h('del', null, JSON.stringify(b[k])), ' → ', h('ins', null, JSON.stringify(a[k]))))) : null;
   };
-  main.replaceChildren(h('section', { class: 'panel' },
+  put(main, h('section', { class: 'panel' },
     h('h2', null, 'Журнал аудита'),
     h('p', { class: 'note' }, 'Каждое изменение и каждый вход. Записи нельзя изменить или удалить.'),
     h('div', { class: 'tbl' }, h('table', null,
@@ -766,7 +852,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, sites: viewSites, setup: viewSetup, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);

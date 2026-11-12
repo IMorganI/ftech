@@ -3,6 +3,7 @@ import {
   InvalidWebhookError,
   type AccountCredentials, type CreatePaymentRequest, type CreatePaymentResult,
   type ProviderAdapter, type ProviderStatus, type VerifiedWebhook, type RefundRequest, type RefundResult,
+  type CredentialField, type ConnectionCheck,
 } from './types.js';
 
 /*
@@ -92,8 +93,26 @@ export function vivaErrorText(status: number, body: string): string {
   return 'Viva вернула ошибку без пояснения';
 }
 
+const VIVA_FIELDS: CredentialField[] = [
+  { key: 'env', label: 'Режим', options: ['demo', 'live'], default: 'demo', required: true, help: 'demo — тестовый кабинет Viva, live — боевой' },
+  { key: 'clientId', label: 'Client ID', required: true, placeholder: '….apps.vivapayments.com',
+    help: 'Settings → API Access → Smart Checkout Credentials (не POS/ECR и не Native Checkout)' },
+  { key: 'clientSecret', label: 'Client Secret', secret: true, required: true, help: 'Там же, Smart Checkout Credentials' },
+  { key: 'merchantId', label: 'Merchant ID', required: true, help: 'Settings → API Access → General' },
+  { key: 'apiKey', label: 'API Key', secret: true, required: true, help: 'Settings → API Access → General' },
+  { key: 'sourceCode', label: 'Код источника платежей', placeholder: 'не обязательно', help: 'Sales → Online Payments → Websites/Apps. Пусто — источник Default' },
+  { key: 'currency', label: 'Валюта аккаунта', default: 'EUR', required: true },
+];
+
 export class VivaAdapter implements ProviderAdapter {
   readonly name = 'viva';
+  readonly title = 'Viva Wallet (Smart Checkout)';
+  readonly credentialFields = VIVA_FIELDS;
+  readonly webhook = {
+    tokenField: 'webhookToken',
+    events: ['Transaction Payment Created', 'Transaction Failed'],
+    help: 'Кабинет Viva → Settings → API Access → Webhooks → Create Webhook: вставь адрес, выбери события, нажми Verify, затем убедись, что статус Active.',
+  };
   private tokens = new Map<string, { token: string; expiresAt: number }>();
   private http: HttpFetch;
 
@@ -101,6 +120,46 @@ export class VivaAdapter implements ProviderAdapter {
     const timeout = opts.timeoutMs ?? 10_000;
     const f = opts.fetch ?? (globalThis.fetch as unknown as HttpFetch);
     this.http = (url, init) => f(url, { ...init, signal: AbortSignal.timeout(timeout) });
+  }
+
+  /** Проверка ключей без создания платежей. */
+  async checkConnection(creds: AccountCredentials): Promise<ConnectionCheck[]> {
+    let c: VivaCredentials;
+    try { c = parseVivaCredentials(creds.secret); } catch (err) {
+      return [{ name: 'Ключи заполнены', ok: false, message: (err as Error).message }];
+    }
+    const checks: ConnectionCheck[] = [];
+    try {
+      const res = await this.http(`${HOSTS[c.env].accounts}/connect/token`, {
+        method: 'POST',
+        headers: { authorization: basic(c.clientId, c.clientSecret), 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'grant_type=client_credentials',
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        checks.push({ name: 'Client ID и Client Secret', ok: false,
+          message: res.status === 400 || res.status === 401 ? `Viva не принимает эту пару (HTTP ${res.status}). Проверь, что режим ${c.env} совпадает с кабинетом` : `Viva ответила HTTP ${res.status}` });
+      } else {
+        const scope = String((JSON.parse(text) as { scope?: string }).scope ?? '');
+        checks.push({ name: 'Client ID и Client Secret', ok: true, message: 'Viva выдаёт токен' });
+        checks.push(scope.includes('redirectcheckout')
+          ? { name: 'Права на онлайн-оплату', ok: true, message: 'Ключи от Smart Checkout' }
+          : { name: 'Права на онлайн-оплату', ok: false,
+              message: `Это ключи не от Smart Checkout (права: ${scope || 'нет'}). Создай их в блоке Smart Checkout Credentials` });
+      }
+    } catch (err) {
+      checks.push({ name: 'Client ID и Client Secret', ok: false, message: `Нет связи с Viva: ${(err as Error).message}` });
+    }
+    try {
+      const res = await this.http(`${HOSTS[c.env].www}/api/messages/config/token`, { method: 'GET', headers: { authorization: basic(c.merchantId, c.apiKey) } });
+      await res.text();
+      checks.push(res.ok
+        ? { name: 'Merchant ID и API Key', ok: true, message: 'Доступ к статусам и возвратам есть' }
+        : { name: 'Merchant ID и API Key', ok: false, message: `Viva не принимает эту пару (HTTP ${res.status}). Без неё не будут работать статусы, возвраты и вебхуки` });
+    } catch (err) {
+      checks.push({ name: 'Merchant ID и API Key', ok: false, message: `Нет связи с Viva: ${(err as Error).message}` });
+    }
+    return checks;
   }
 
   private async token(c: VivaCredentials): Promise<string> {
