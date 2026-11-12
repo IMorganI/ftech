@@ -1,5 +1,6 @@
 import type { Pool } from '../db/pool.js';
 import type { Sender } from './telegram.js';
+import { capacity } from '../admin/capacity.js';
 
 /*
  * Уведомления о том, что требует внимания человека. Проверяется периодически; каждое событие
@@ -76,6 +77,20 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
      WHERE ${sent} LIMIT 20`)).rows) {
     out.push({ key: r.key, text: `🔌 Провайдер не отвечает: аккаунт «${r.name}», ${r.n} сбо(я/ев) за 15 минут.\nПоследняя ошибка: ${String(r.error).slice(0, 200)}\nПлатежи ждут сверки. ${boardUrl}#payments` });
   }
+  // Общая ёмкость по валюте: 70% и 90% дневных лимитов всех включённых аккаунтов — раз в сутки на порог.
+  const day = new Date().toISOString().slice(0, 10);
+  for (const c of (await capacity(pool)).currencies) {
+    for (const level of [70, 90]) {
+      if (c.fillPct < level) continue;
+      const key = `capacity:${c.currency}:${level}:${day}`;
+      if ((await pool.query(`SELECT 1 FROM notifications_sent WHERE key = $1`, [key])).rows[0]) continue;
+      const eta = c.exhaustInMin !== null && c.exhaustInMin < c.resetInMin
+        ? ` При текущем темпе (${money(c.ratePerHour, c.currency)}/ч) лимиты закончатся примерно через ${c.exhaustInMin < 60 ? `${c.exhaustInMin} мин` : `${Math.round(c.exhaustInMin / 60)} ч`}.` : '';
+      out.push({ key, text: `${level >= 90 ? '🔴' : '🟠'} Занято ${c.fillPct}% дневных лимитов в ${c.currency}: свободно ${money(c.free, c.currency)}.${eta} Подключи или включи аккаунт, подними лимит у провайдера.
+${boardUrl}#accounts` });
+    }
+  }
+
   // Новый чарджбэк и приближающийся срок ответа.
   for (const r of (await pool.query(
     `SELECT * FROM (SELECT 'chargeback:' || cb.id AS key, cb.amount, cb.currency, cb.reason_code, cb.respond_by, m.name, p.external_id AS player

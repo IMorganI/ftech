@@ -46,6 +46,7 @@ export type DeclineCode =
   | 'player_limit_exceeded'
   | 'country_not_licensed'
   | 'no_route'
+  | 'capacity_exhausted'
   | 'all_attempts_failed'
   | 'provider_unavailable';
 
@@ -59,6 +60,8 @@ export interface TransactionView {
   status: 'created' | 'pending' | 'success' | 'declined' | 'failed';
   merchantAccountId: string | null;
   declineCode: string | null;
+  /** Подробности отказа, например { maxAmountNow } для capacity_exhausted. */
+  declineDetails?: Record<string, unknown> | null;
   /** Для выплат: ID вывода в системе казино. */
   withdrawalId?: string | null;
   /** Куда отправить игрока для оплаты (страница провайдера), пока платёж ожидает оплаты. */
@@ -76,6 +79,10 @@ export class IdempotencyConflictError extends Error {
 interface Candidate {
   id: string;
   name: string;
+  tier: 'primary' | 'reserve';
+  weight: number;
+  max_amount: bigint;
+  min_amount: bigint;
   priority: number;
   fee_bps: number;
   daily_cap: bigint;
@@ -91,12 +98,12 @@ interface Pick {
   reason: string;
 }
 
-const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, withdrawal_id, created_at, updated_at`;
+const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, decline_details, withdrawal_id, created_at, updated_at`;
 
 function toView(r: Record<string, any>): TransactionView {
   return {
     id: r.id, siteId: r.site_id, playerId: r.player_id, type: r.type, amount: r.amount, currency: r.currency,
-    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code, withdrawalId: r.withdrawal_id ?? null,
+    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code, declineDetails: r.decline_details ?? null, withdrawalId: r.withdrawal_id ?? null,
     paymentUrl: r.payment_url ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
@@ -161,14 +168,15 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
   }, 'deposit', { increaseDelayHours: delay });
 
   const op = (await c.query(
-    `SELECT licenses, kyc_required_above, max_attempts FROM operators WHERE id = $1`, [req.operatorId],
+    `SELECT licenses, kyc_required_above, max_attempts, routing_mode FROM operators WHERE id = $1`, [req.operatorId],
   )).rows[0];
 
-  const insertTx = async (status: 'pending' | 'declined', accountId: string | null, decline: DeclineCode | null) =>
+  const insertTx = async (status: 'pending' | 'declined', accountId: string | null, decline: DeclineCode | null, details: Record<string, unknown> | null = null) =>
     toView((await c.query(
-      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, idempotency_key, request_hash, return_url)
-       VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${TX_COLUMNS}`,
-      [req.siteId, player.id, req.amount, req.currency, status, accountId, decline, req.idempotencyKey, hash, req.returnUrl ?? null],
+      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, idempotency_key, request_hash, return_url, decline_details)
+       VALUES ($1, $2, 'deposit', $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING ${TX_COLUMNS}`,
+      [req.siteId, player.id, req.amount, req.currency, status, accountId, decline, req.idempotencyKey, hash, req.returnUrl ?? null,
+       details ? JSON.stringify(details) : null],
     )).rows[0]);
 
   // 1. Проверки игрока
@@ -176,11 +184,15 @@ async function createDeposit(c: Client, req: DepositRequest, hash: string): Prom
   if (decline) return insertTx('declined', null, decline);
 
   // 2–4. Выбор аккаунта
-  const pick = await pickAccount(c, {
-    operatorId: req.operatorId, currency: req.currency, country: p.country, amount: req.amount,
+  const { pick, capacity } = await pickAccount(c, {
+    operatorId: req.operatorId, mode: op.routing_mode, currency: req.currency, country: p.country, amount: req.amount,
     stickyAccountId: player.sticky_account_id, exclude: [],
   });
-  if (!pick) return insertTx('declined', null, 'no_route');
+  if (!pick) {
+    // Аккаунты для этой валюты/страны/суммы есть, но лимиты заполнены — говорим сайту, сколько можно принять сейчас.
+    if (capacity) return insertTx('declined', null, 'capacity_exhausted', { maxAmountNow: capacity.maxAmountNow?.toString() ?? null });
+    return insertTx('declined', null, 'no_route');
+  }
 
   // 5. Резерв и попытка
   await reserve(c, pick, req.amount);
@@ -213,6 +225,7 @@ async function playerDecline(
 
 interface PickInput {
   operatorId: string;
+  mode: 'fill' | 'weights';
   currency: string;
   country: string;
   amount: bigint;
@@ -220,9 +233,15 @@ interface PickInput {
   exclude: string[];
 }
 
-async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
+interface PickResult {
+  pick: Pick | null;
+  /** Кандидаты были, но лимиты заполнены: сколько максимум можно принять сейчас (null — ничего). */
+  capacity: { maxAmountNow: bigint | null } | null;
+}
+
+async function pickAccount(c: Client, inp: PickInput): Promise<PickResult> {
   const cands = (await c.query<Candidate>(
-    `SELECT id, name, priority, fee_bps, daily_cap, monthly_cap, switch_at_bps,
+    `SELECT id, name, tier, weight, min_amount, max_amount, priority, fee_bps, daily_cap, monthly_cap, switch_at_bps,
             to_char((now() AT TIME ZONE cap_timezone)::date, 'YYYY-MM-DD') AS today
      FROM merchant_accounts
      WHERE operator_id = $1 AND enabled
@@ -232,7 +251,7 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
      ORDER BY id`,
     [inp.operatorId, inp.currency, inp.country, inp.amount, inp.exclude],
   )).rows;
-  if (!cands.length) return null;
+  if (!cands.length) return { pick: null, capacity: null };
 
   // Строки оборота на сегодня: создаём, если их нет, и блокируем в порядке id.
   // Оборот считается в валюте платежа: разные валюты не складываются.
@@ -260,33 +279,53 @@ async function pickAccount(c: Client, inp: PickInput): Promise<Pick | null> {
   )).rows) monthly.set(r.id, r.total);
 
   const skipped: string[] = [];
-  const fitting: { a: Candidate; free: bigint }[] = [];
+  const fitting: { a: Candidate; free: bigint; today: bigint }[] = [];
+  let maxNow: bigint | null = null; // сколько можно было бы принять сейчас (для capacity_exhausted)
   for (const a of cands) {
     const u = usage.get(a.id)!;
     const dailyLimit = (a.daily_cap * BigInt(a.switch_at_bps)) / 10000n;
-    const free = dailyLimit - u.used - u.reserved;
-    if (free < inp.amount) { skipped.push(`${a.name}: дневной лимит`); continue; }
+    let free = dailyLimit - u.used - u.reserved;
     if (a.monthly_cap !== null) {
       const monthLimit = (a.monthly_cap * BigInt(a.switch_at_bps)) / 10000n;
-      if ((monthly.get(a.id) ?? 0n) + inp.amount > monthLimit) { skipped.push(`${a.name}: месячный лимит`); continue; }
+      const monthFree = monthLimit - (monthly.get(a.id) ?? 0n);
+      if (monthFree < free) free = monthFree;
     }
-    fitting.push({ a, free });
+    const cap = free < a.max_amount ? free : a.max_amount;
+    if (cap >= a.min_amount && (maxNow === null || cap > maxNow)) maxNow = cap;
+    if (free < inp.amount) { skipped.push(`${a.name}: лимит`); continue; }
+    fitting.push({ a, free, today: u.used + u.reserved });
   }
-  if (!fitting.length) return null;
+  if (!fitting.length) return { pick: null, capacity: { maxAmountNow: maxNow } };
 
-  fitting.sort((x, y) =>
-    Number(y.a.id === inp.stickyAccountId) - Number(x.a.id === inp.stickyAccountId) ||
-    y.a.priority - x.a.priority ||
-    x.a.fee_bps - y.a.fee_bps ||
-    (y.free > x.free ? 1 : y.free < x.free ? -1 : 0));
+  // 1. Уровень: резервные аккаунты — только если не подходит ни один основной.
+  const primary = fitting.filter((f) => f.a.tier === 'primary');
+  const pool = primary.length ? primary : fitting;
+  const usedReserve = !primary.length;
+  // 2. «Липкий» аккаунт игрока (его прошлый успешный), если он в этом уровне и подходит.
+  const sticky = pool.find((f) => f.a.id === inp.stickyAccountId);
+  // 3. Приоритет: среди подходящих берём самый высокий.
+  const topPriority = Math.max(...pool.map((f) => f.a.priority));
+  const group = pool.filter((f) => f.a.priority === topPriority);
+  // 4. Доли по весам: выбираем аккаунт, которому до своей доли сегодняшнего оборота не хватает больше всего
+  //    (с учётом этого платежа). Так оборот распределяется ровно — 60/30/10, а не «по очереди до упора».
+  //    В режиме fill (по порядку) — дешевле комиссия, затем больше свободного лимита.
+  const totalW = group.reduce((s, f) => s + f.a.weight, 0);
+  const totalToday = group.reduce((s, f) => s + f.today, 0n) + inp.amount;
+  const deficit = (f: { a: Candidate; today: bigint }) =>
+    inp.mode === 'weights' ? (f.a.weight / totalW) * Number(totalToday) - Number(f.today) : 0;
+  const best = sticky ?? [...group].sort((x, y) =>
+    deficit(y) - deficit(x) || x.a.fee_bps - y.a.fee_bps || (y.free > x.free ? 1 : y.free < x.free ? -1 : 0) || x.a.id.localeCompare(y.a.id))[0]!;
 
-  const best = fitting[0]!.a;
-  let reason = best.id === inp.stickyAccountId ? 'липкость к прошлому аккаунту игрока'
-    : `лучший по приоритету и комиссии (${best.fee_bps / 100}%)`;
-  if (inp.stickyAccountId && best.id !== inp.stickyAccountId) reason += '; прошлый аккаунт игрока недоступен';
+  const share = (f: { today: bigint }) => (Number(totalToday - inp.amount) > 0 ? Math.round((Number(f.today) / Number(totalToday - inp.amount)) * 100) : 0);
+  let reason = sticky ? 'прошлый аккаунт игрока (липкость)'
+    : group.length === 1 ? 'единственный подходящий аккаунт'
+    : inp.mode === 'weights' ? `доля по весам: вес ${Math.round((best.a.weight / totalW) * 100)}%, сегодня было ${share(best)}% оборота`
+    : `лучший по приоритету и комиссии (${best.a.fee_bps / 100}%)`;
+  if (usedReserve) reason = `РЕЗЕРВ (основные не подходят) · ${reason}`;
+  if (inp.stickyAccountId && !sticky) reason += '; прошлый аккаунт игрока недоступен';
   if (skipped.length) reason += `; пропущены: ${skipped.join(', ')}`;
   if (inp.exclude.length) reason += `; каскад после ${inp.exclude.length} отказа(ов)`;
-  return { account: best, day: best.today, currency: inp.currency, reason };
+  return { pick: { account: best.a, day: best.a.today, currency: inp.currency, reason }, capacity: null };
 }
 
 async function reserve(c: Client, pick: Pick, amount: bigint) {
@@ -363,18 +402,18 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
       [attempt.id, outcome.providerRef ?? null, outcome.error ?? null]);
 
     const ctx = (await c.query(
-      `SELECT p.country, p.sticky_account_id, s.operator_id, o.max_attempts,
+      `SELECT p.country, p.sticky_account_id, s.operator_id, o.max_attempts, o.routing_mode,
               array_agg(a.merchant_account_id) AS tried
        FROM transactions t JOIN players p ON p.id = t.player_id JOIN sites s ON s.id = t.site_id
        JOIN operators o ON o.id = s.operator_id JOIN transaction_attempts a ON a.transaction_id = t.id
-       WHERE t.id = $1 GROUP BY p.country, p.sticky_account_id, s.operator_id, o.max_attempts`, [txId],
+       WHERE t.id = $1 GROUP BY p.country, p.sticky_account_id, s.operator_id, o.max_attempts, o.routing_mode`, [txId],
     )).rows[0];
 
     const next = !outcome.final && attempt.attempt_no < ctx.max_attempts
-      ? await pickAccount(c, {
-          operatorId: ctx.operator_id, currency: tx.currency.trim(), country: ctx.country.trim(), amount,
+      ? (await pickAccount(c, {
+          operatorId: ctx.operator_id, mode: ctx.routing_mode, currency: tx.currency.trim(), country: ctx.country.trim(), amount,
           stickyAccountId: ctx.sticky_account_id, exclude: ctx.tried,
-        })
+        })).pick
       : null;
 
     if (!next) {
@@ -415,6 +454,7 @@ export function serializeTx(tx: TransactionView) {
     amount: tx.amount.toString(),
     currency: tx.currency,
     declineCode: tx.declineCode,
+    ...(tx.declineDetails ? { declineDetails: tx.declineDetails } : {}),
     paymentUrl: tx.status === 'pending' ? tx.paymentUrl : null,
     createdAt: tx.createdAt.toISOString(),
     updatedAt: tx.updatedAt.toISOString(),
