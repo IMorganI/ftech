@@ -123,6 +123,16 @@ describe.skipIf(!url)('QA: регрессии', () => {
     expect((await deposit(1000, 'UAH')).statusCode).toBe(201); // настоящая валюта — платёж создаётся (отказ no_route)
   });
 
+  it('API сайтов: общий предел с одного IP — запросы с несуществующими ключами тоже считаются', async () => {
+    await app.close();
+    app = buildApp({ pool, mock, providers, secrets, rateLimitPerMinute: 100000, rateLimitPerIpPerMinute: 5 });
+    const codes: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      codes.push((await app.inject({ method: 'POST', url: '/v1/deposits', headers: { authorization: `Bearer ftk_fake_${i}` }, payload: {} })).statusCode);
+    }
+    expect(codes).toEqual([401, 401, 401, 401, 401, 429, 429]);
+  });
+
   it('адрес вебхуков провайдера: ограничение частоты, мусор не раздувает журнал', async () => {
     const acc = await account('A');
     await pool.query(`UPDATE merchant_accounts SET webhook_token = 'tok' WHERE id = $1`, [acc]);

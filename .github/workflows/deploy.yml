@@ -1,0 +1,76 @@
+name: Deploy
+
+# После мерджа в main: образ собирается и выкладывается на staging.
+# На прод — вручную: Actions → Deploy → Run workflow → production (с подтверждением, см. docs/DEPLOY.md).
+# Пока выкладка не настроена (переменная репозитория DEPLOY_ENABLED != true), workflow ничего не делает.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Куда выкладывать
+        type: choice
+        options: [production, staging]
+        default: production
+      tag:
+        description: Тег образа (полный хэш коммита). Пусто — текущий коммит; прошлый — для отката
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event_name == 'push' && 'staging' || inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    if: vars.DEPLOY_ENABLED == 'true' && (github.event_name == 'push' || inputs.tag == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Сборка и публикация образа в GitHub Container Registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build --pull -t "$IMAGE:$GITHUB_SHA" .
+          docker push "$IMAGE:$GITHUB_SHA"
+
+  deploy:
+    needs: image
+    if: >-
+      always() && vars.DEPLOY_ENABLED == 'true' &&
+      (needs.image.result == 'success' || needs.image.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Секреты и правила (например, подтверждение перед продом) — в Settings → Environments.
+    environment: ${{ github.event_name == 'push' && 'staging' || inputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Выкладка на сервер
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          TAG: ${{ inputs.tag || github.sha }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          SSH="ssh -i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=yes"
+          # Конфиги и скрипты стенда — из репозитория, чтобы сервер всегда совпадал с кодом.
+          $SSH "deploy@$HOST" 'mkdir -p /opt/ftech/deploy'
+          scp -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes deploy/docker-compose.yml deploy/Caddyfile "deploy@$HOST:/opt/ftech/"
+          scp -i ~/.ssh/id_deploy -o StrictHostKeyChecking=yes deploy/*.sh "deploy@$HOST:/opt/ftech/deploy/"
+          $SSH "deploy@$HOST" "chmod +x /opt/ftech/deploy/*.sh && /opt/ftech/deploy/deploy.sh '$TAG'"

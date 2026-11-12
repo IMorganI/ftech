@@ -8,3 +8,4 @@ dist/
 coverage/
 DEMO-CREDENTIALS.md
 .data/
+deploy/.env

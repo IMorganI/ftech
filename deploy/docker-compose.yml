@@ -1,0 +1,72 @@
+# Продакшн-стенд на одном сервере: Caddy (HTTPS) → приложение → PostgreSQL.
+# Запуск на сервере из /opt/ftech:  docker compose --env-file .env up -d
+# Подробно — docs/DEPLOY.md.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "20m", max-file: "5" }   # логи не съедят диск
+
+services:
+  db:
+    image: postgres:16.6
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ftech
+      POSTGRES_DB: ftech
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?задай DB_PASSWORD в .env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ftech -d ftech"]
+      interval: 5s
+      retries: 20
+    logging: *logging
+    # База не публикуется наружу: доступна только приложению внутри сети compose.
+
+  migrate:
+    image: ${IMAGE:-ghcr.io/imorgani/ftech}:${IMAGE_TAG:-latest}
+    command: ["node", "dist/db/migrate.js"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://ftech:${DB_PASSWORD}@db:5432/ftech
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+    logging: *logging
+
+  app:
+    image: ${IMAGE:-ghcr.io/imorgani/ftech}:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://ftech:${DB_PASSWORD}@db:5432/ftech
+      NODE_ENV: production
+      TRUST_PROXY: "true"
+      HOST: 0.0.0.0
+      PORT: "3000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging: *logging
+
+  caddy:
+    image: caddy:2.8.4
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN:?задай DOMAIN в .env}
+      ACME_EMAIL: ${ACME_EMAIL:?задай ACME_EMAIL в .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [app]
+    logging: *logging
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

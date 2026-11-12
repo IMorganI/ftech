@@ -32,7 +32,7 @@ if (config.MOCK_PROVIDER_ENABLED) {
 }
 
 const app = buildApp({
-  pool, providers, secrets, mock, testpay, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE,
+  pool, providers, secrets, mock, testpay, logLevel: config.LOG_LEVEL, rateLimitPerMinute: config.RATE_LIMIT_PER_MINUTE, rateLimitPerIpPerMinute: config.RATE_LIMIT_PER_IP_PER_MINUTE,
   admin: { encryptionKey, secureCookies: config.PUBLIC_BASE_URL.startsWith('https://'), webhookBaseUrl: config.WEBHOOK_BASE_URL ?? config.PUBLIC_BASE_URL },
   trustProxy: config.TRUST_PROXY,
 });

@@ -25,6 +25,8 @@ export interface AppDeps {
   logLevel?: string;
   /** Запросов в минуту на один API-ключ (или IP без ключа). */
   rateLimitPerMinute?: number;
+  /** Общий предел запросов к API сайтов с одного IP в минуту (по умолчанию 3000). */
+  rateLimitPerIpPerMinute?: number;
   /** Частота запросов на адрес вебхуков провайдеров с одного IP, в минуту (по умолчанию 600). */
   webhookRateLimitPerMinute?: number;
   /** Админка: ключ шифрования секретов и флаг HTTPS-cookie. */
@@ -67,7 +69,14 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     const payment = { pool, providers, secrets, encryptionKey: deps.admin?.encryptionKey };
 
     // API для сайтов: авторизация по ключу + ограничение частоты.
-    app.register(async (api) => {
+    app.register(async (outer) => {
+      // Внешний предел — по IP: запросы с несуществующими ключами тоже считаются.
+      await outer.register(rateLimit, {
+        max: deps.rateLimitPerIpPerMinute ?? 3000, timeWindow: '1 minute', keyGenerator: (req) => req.ip,
+        errorResponseBuilder: (_req, ctx) => ({ statusCode: 429,
+          error: { code: 'rate_limited', message: `Слишком много запросов с этого адреса, повторите через ${Math.ceil(ctx.ttl / 1000)} с` } }),
+      });
+      await outer.register(async (api) => {
       await api.register(rateLimit, {
         max: deps.rateLimitPerMinute ?? 600,
         timeWindow: '1 minute',
@@ -80,6 +89,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
       await api.register(depositRoutes, payment);
       await api.register(payoutRoutes, payment);
       await api.register(playerRoutes, payment);
+      });
     });
 
     // Вебхуки провайдеров: без ключа сайта, защищены подписью провайдера.

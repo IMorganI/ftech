@@ -1,0 +1,14 @@
+node_modules
+dist
+.git
+.github
+.devcontainer
+.env
+.env.*
+.data
+test
+docs
+prototype
+deploy
+*.md
+coverage
