@@ -8,7 +8,8 @@ import type { Sender } from './telegram.js';
  *  - новое расхождение с провайдером (reconciliation_issues);
  *  - вебхук сайту не доставлен после всех попыток;
  *  - аккаунт дошёл до порога переключения — один раз за сутки;
- *  - провайдер не отвечает при создании платежей — не чаще раза в час на аккаунт.
+ *  - провайдер не отвечает при создании платежей — не чаще раза в час на аккаунт;
+ *  - отправка не подтверждена или вебхук провайдера не обработан дольше 10 минут.
  */
 
 export interface Alert {
@@ -46,7 +47,7 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
        FROM webhook_deliveries w JOIN sites s ON s.id = w.site_id
        WHERE w.status = 'failed' AND w.created_at > now() - interval '7 days') k
      WHERE ${sent} ORDER BY key LIMIT 20`)).rows) {
-    out.push({ key: r.key, text: `📭 Сайт «${r.site}» не получил уведомление ${r.event} после всех попыток (${r.last_error ?? 'ошибка'}).\nПроверь адрес вебхука: ${boardUrl}#sites` });
+    out.push({ key: r.key, text: `📭 Сайт «${r.site}» не получил уведомление ${r.event} после всех попыток (${r.last_error ?? 'ошибка'}).\nПроверь адрес вебхука сайта: ${boardUrl}#connect` });
   }
 
   for (const r of (await pool.query(
@@ -70,10 +71,30 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
     `SELECT * FROM (SELECT 'prov_err:' || m.id || ':' || to_char(date_trunc('hour', now()), 'YYYY-MM-DD"T"HH24') AS key,
          m.name, count(*)::int AS n, max(a.error) AS error
        FROM transaction_attempts a JOIN merchant_accounts m ON m.id = a.merchant_account_id
-       WHERE a.error LIKE 'submit_error:%' AND a.created_at > now() - interval '15 minutes'
+       WHERE a.error LIKE 'submission_unknown:%' AND a.created_at > now() - interval '15 minutes'
        GROUP BY m.id, m.name) k
      WHERE ${sent} LIMIT 20`)).rows) {
     out.push({ key: r.key, text: `🔌 Провайдер не отвечает: аккаунт «${r.name}», ${r.n} сбо(я/ев) за 15 минут.\nПоследняя ошибка: ${String(r.error).slice(0, 200)}\nПлатежи ждут сверки. ${boardUrl}#payments` });
+  }
+  // Отправка не подтверждена дольше 10 минут: деньги в подвешенном состоянии.
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'stuck_submit:' || a.id AS key, t.amount, t.currency, m.name, a.error
+       FROM transaction_attempts a JOIN transactions t ON t.id = a.transaction_id JOIN merchant_accounts m ON m.id = a.merchant_account_id
+       WHERE a.status = 'pending' AND a.submitted_at < now() - interval '10 minutes' AND a.provider_ref IS NULL
+         AND a.submit_outcome IS DISTINCT FROM 'declined' AND a.submitted_at > now() - interval '7 days') k
+     WHERE ${sent} LIMIT 20`)).rows) {
+    out.push({ key: r.key, text: `⏳ Платёж ${money(r.amount, r.currency)} висит: ответ провайдера на создание потерян (аккаунт «${r.name}»). Без каскада, пока не выяснится, создан ли платёж.
+${boardUrl}#stuck` });
+  }
+
+  // Вебхук провайдера не обработан дольше 10 минут.
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'stuck_inbox:' || e.id AS key, m.name, e.attempts, e.last_error
+       FROM provider_webhook_events e JOIN merchant_accounts m ON m.id = e.merchant_account_id
+       WHERE e.processed_at IS NULL AND e.received_at < now() - interval '10 minutes' AND e.received_at > now() - interval '7 days') k
+     WHERE ${sent} LIMIT 20`)).rows) {
+    out.push({ key: r.key, text: `📨 Вебхук провайдера (аккаунт «${r.name}») не удаётся обработать: ${r.attempts} попыток, ${String(r.last_error ?? '').slice(0, 150)}.
+${boardUrl}#stuck` });
   }
   return out;
 }

@@ -67,6 +67,7 @@ const pill = (status) => { const [c, t] = STATUS[status] || ['m', status]; retur
 const DECLINE = {
   player_self_excluded: 'самоисключение', country_not_licensed: 'страна вне лицензии', kyc_rejected: 'KYC отклонён',
   kyc_required: 'нужен KYC', player_limit_exceeded: 'лимит игрока', no_route: 'нет маршрута', all_attempts_failed: 'отказ провайдеров',
+  provider_unavailable: 'провайдер не ответил (без каскада)', amount_over_limit: 'больше лимита выплаты',
 };
 
 function errorBox(err) {
@@ -716,6 +717,7 @@ function viewSandbox(main) {
       field('Сумма', h('input', { name: 'amount', required: true, value: '10.00', inputmode: 'decimal' })),
       field('Валюта', h('input', { name: 'currency', required: true, value: 'EUR', maxlength: 3 })),
       field('ID игрока', h('input', { name: 'player', required: true, value: 'demo-player-1' })),
+      field('ID вывода в казино', h('input', { name: 'withdrawal', required: true, value: `W-${Date.now().toString(36).toUpperCase()}` })),
       h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Создать выплату')),
     ], async (v) => {
       if (!sb.key) throw new Error('Сначала вставь API-ключ сайта в форму депозита выше');
@@ -723,7 +725,7 @@ function viewSandbox(main) {
       if (!amount) throw new Error('Сумма — число больше нуля');
       const res = await fetch('/v1/payouts', { method: 'POST', headers: {
         'content-type': 'application/json', authorization: `Bearer ${sb.key}`, 'idempotency-key': `sandbox-${crypto.randomUUID()}` },
-        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), player: { id: v.player.trim() } }) });
+        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), withdrawalId: v.withdrawal.trim(), player: { id: v.player.trim() } }) });
       const data = await res.json().catch(() => null);
       if (!res.ok) { const e = new Error(data?.error?.message || `Ошибка ${res.status}`); e.details = data?.error?.details; throw e; }
       return h('div', { class: `msg ${data.status === 'declined' ? 'err' : 'ok'}` },
