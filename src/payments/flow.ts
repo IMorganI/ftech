@@ -74,15 +74,15 @@ export async function submitPending(d: PaymentDeps, txId: string): Promise<Trans
       });
     } catch (err) {
       // Не знаем, создался ли платёж у провайдера, поэтому не каскадим вслепую:
-      // попытка остаётся pending, её разберёт сверка (reconcile).
-      await d.pool.query(`UPDATE transaction_attempts SET error = $2 WHERE id = $1`,
-        [claimed.id, `submit_error: ${(err as Error).message}`.slice(0, 500)]);
+      // попытка остаётся pending с отметкой unknown, её разберёт сверка (reconcile).
+      await d.pool.query(`UPDATE transaction_attempts SET error = $2, submit_outcome = 'unknown' WHERE id = $1`,
+        [claimed.id, `submission_unknown: ${(err as Error).message}`.slice(0, 500)]);
       break;
     }
 
     if (result.kind === 'redirect') {
       await withTransaction(d.pool, async (c) => {
-        await c.query(`UPDATE transaction_attempts SET provider_ref = $2, redirect_url = $3 WHERE id = $1`,
+        await c.query(`UPDATE transaction_attempts SET provider_ref = $2, redirect_url = $3, submit_outcome = 'created' WHERE id = $1`,
           [claimed.id, result.providerRef, result.redirectUrl]);
         // После каскада у платежа новая ссылка на оплату — сообщаем сайту.
         if (claimed.attempt_no > 1) {
@@ -93,7 +93,8 @@ export async function submitPending(d: PaymentDeps, txId: string): Promise<Trans
       break;
     }
 
-    // Мгновенный отказ провайдера → каскад (resolveAttempt сам выберет следующий аккаунт).
+    // Мгновенный отказ провайдера: платёж не создан → каскад безопасен (resolveAttempt выберет следующий аккаунт).
+    await d.pool.query(`UPDATE transaction_attempts SET submit_outcome = 'declined' WHERE id = $1`, [claimed.id]);
     const after = await resolveAttempt(d.pool, txId, {
       status: 'declined', attemptId: claimed.id, providerRef: result.providerRef, error: result.reason,
     });
@@ -306,32 +307,71 @@ async function applyProviderStatus(
 
 /**
  * Сверка зависших попыток: вебхук мог потеряться. Спрашиваем статус у провайдера сами.
- * Попытки, которые не удалось даже отправить, закрываются отказом (с каскадом).
+ * Отправку с потерянным ответом (submit_outcome = unknown или процесс упал посреди отправки)
+ * НЕ закрываем вслепую: провайдер мог создать платёж, и каскад на другой аккаунт дал бы игроку
+ * шанс заплатить дважды. Порядок:
+ *   1. если провайдер умеет искать по нашему ID — ищем: нашёлся → продолжаем как обычно,
+ *      подтверждено «нет такого» → закрываем отказом (каскад разрешён);
+ *   2. иначе ждём, пока истечёт срок оплаты заказа провайдера, и закрываем платёж отказом БЕЗ каскада.
  */
+const LOOKUP_GRACE_SEC = 120;
+const DEFAULT_TTL_SEC = 24 * 3600;
+
 export async function reconcilePending(d: PaymentDeps, olderThanSec = 300): Promise<{ checked: number; resolved: number }> {
-  const rows = (await d.pool.query<AttemptRow & { error: string | null; submitted_at: Date | null }>(
-    `${ATTEMPT_SELECT.replace('SELECT a.id,', 'SELECT a.error, a.submitted_at, a.id,')}
+  const rows = (await d.pool.query<AttemptRow & { error: string | null; submitted_at: Date | null; submit_outcome: string | null; age_sec: number }>(
+    `${ATTEMPT_SELECT.replace('SELECT a.id,', `SELECT a.error, a.submitted_at, a.submit_outcome,
+       extract(epoch FROM now() - coalesce(a.submitted_at, a.created_at))::int AS age_sec, a.id,`)}
      WHERE a.status = 'pending' AND coalesce(a.submitted_at, a.created_at) < now() - make_interval(secs => $1)
-       AND (a.error IS NULL OR a.error NOT LIKE 'amount_mismatch%') -- такие разбирает человек
+       AND (a.error IS NULL OR (a.error NOT LIKE 'amount_mismatch%' AND a.error NOT LIKE 'unverified%')) -- такие разбирает человек
      ORDER BY a.created_at LIMIT 100`, [olderThanSec],
   )).rows;
   let resolved = 0;
   for (const a of rows) {
     try {
       if (!a.submitted_at) {
-        // Процесс упал между резервом и отправкой — отправляем сейчас.
+        // Процесс упал между резервом и отправкой — отправки не было, отправляем сейчас.
         await submitPending(d, a.transaction_id);
         resolved++;
         continue;
       }
+      const adapter = d.providers.get(a.adapter);
+      const creds = await credsFor(d, a.merchant_account_id);
       if (!a.provider_ref) {
-        const tx = await resolveAttempt(d.pool, a.transaction_id, { status: 'declined', attemptId: a.id, error: a.error ?? 'not_submitted' });
-        if (tx.status === 'pending') await submitPending(d, tx.id);
-        resolved++;
+        if (a.submit_outcome === 'declined') {
+          const tx = await resolveAttempt(d.pool, a.transaction_id, { status: 'declined', attemptId: a.id, error: a.error ?? 'declined' });
+          if (tx.status === 'pending') await submitPending(d, tx.id);
+          resolved++;
+          continue;
+        }
+        // Судьба отправки неизвестна.
+        if (adapter.findPayment) {
+          const found = await adapter.findPayment(creds, a.id); // исключение — попробуем на следующем проходе
+          if (found) {
+            await d.pool.query(`UPDATE transaction_attempts SET provider_ref = $2, submit_outcome = 'created',
+              error = coalesce(error, '') || ' → найден у провайдера' WHERE id = $1`, [a.id, found.providerRef]);
+            const r = await applyProviderStatus(d, adapter, creds, a.merchant_account_id, found.providerRef);
+            if (r === 'processed') resolved++;
+            continue;
+          }
+          if (a.age_sec >= LOOKUP_GRACE_SEC) {
+            // Провайдер подтвердил: платежа нет. Каскад безопасен.
+            const tx = await resolveAttempt(d.pool, a.transaction_id, { status: 'declined', attemptId: a.id,
+              error: 'submission_unknown: провайдер подтвердил, что платёж не создан' });
+            if (tx.status === 'pending') await submitPending(d, tx.id);
+            resolved++;
+          }
+          continue;
+        }
+        const ttl = adapter.paymentTtlSec ?? DEFAULT_TTL_SEC;
+        if (a.age_sec >= ttl + LOOKUP_GRACE_SEC) {
+          // Срок оплаты заказа истёк — даже если он был создан, оплатить его уже нельзя. Закрываем без каскада.
+          await resolveAttempt(d.pool, a.transaction_id, { status: 'declined', attemptId: a.id, final: 'provider_unavailable',
+            error: 'submission_unknown: ответ провайдера потерян, срок оплаты истёк — закрыто без каскада' });
+          resolved++;
+        }
         continue;
       }
-      const adapter = d.providers.get(a.adapter);
-      const r = await applyProviderStatus(d, adapter, await credsFor(d, a.merchant_account_id, a.credentials_ref), a.merchant_account_id, a.provider_ref);
+      const r = await applyProviderStatus(d, adapter, creds, a.merchant_account_id, a.provider_ref);
       if (r === 'processed') resolved++;
     } catch {
       // Провайдер недоступен — попробуем на следующем проходе.

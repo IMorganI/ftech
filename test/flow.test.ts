@@ -274,7 +274,60 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
     expect((await tx(d.id)).status).toBe('success');
   });
 
-  it('провайдер недоступен при отправке: платёж ждёт, сверка переводит его на другой аккаунт', async () => {
+  it('ответ на создание потерян: без поиска у провайдера каскада нет — платёж закрывается после срока оплаты', async () => {
+    const accA = await account('A', 100);
+    await account('B', 200);
+    const real = new MockAdapter(mock);
+    let failFor: string | null = accA;
+    const flaky: ProviderAdapter = { // как провайдер без поиска по нашему ID
+      name: 'mock', manifest: real.manifest, paymentTtlSec: 1800,
+      createPayment: async (c, r) => { if (c.accountId === failFor) throw new Error('ETIMEDOUT'); return real.createPayment(c, r); },
+      getStatus: (c, ref) => real.getStatus(c, ref),
+      verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
+    };
+    providers.register(flaky);
+    const d = await deposit();
+    expect(d).toMatchObject({ status: 'pending', paymentUrl: null });
+    expect((await attempts(d.id))[0].error).toMatch(/submission_unknown: ETIMEDOUT/);
+    failFor = null;
+    // Через 10 минут — ещё рано: заказ у провайдера мог быть создан и его ещё можно оплатить.
+    await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '10 minutes'`);
+    await reconcilePending({ pool, providers, secrets }, 300);
+    expect((await attempts(d.id)).map((x) => [x.name, x.status])).toEqual([['A', 'pending']]);
+    // Срок оплаты (30 мин) истёк — закрываем отказом БЕЗ каскада на B.
+    await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '40 minutes'`);
+    await reconcilePending({ pool, providers, secrets }, 300);
+    expect((await attempts(d.id)).map((x) => [x.name, x.status])).toEqual([['A', 'declined']]);
+    expect(await tx(d.id)).toMatchObject({ status: 'declined', decline_code: 'provider_unavailable' });
+  });
+
+  it('ответ на создание потерян, но провайдер умеет искать по нашему ID: нашёлся — платёж продолжается', async () => {
+    const accA = await account('A', 100);
+    await account('B', 200);
+    const real = new MockAdapter(mock);
+    const lossy: ProviderAdapter = { // провайдер создал заказ, а ответ до нас не дошёл
+      ...Object.fromEntries(['name', 'manifest', 'paymentTtlSec'].map((k) => [k, (real as unknown as Record<string, unknown>)[k]])) as Pick<ProviderAdapter, 'name' | 'manifest'>,
+      createPayment: async (c, r) => { const res = await real.createPayment(c, r); if (c.accountId === accA) throw new Error('socket hang up'); return res; },
+      getStatus: (c, ref) => real.getStatus(c, ref),
+      verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
+      findPayment: (c, ref) => real.findPayment(c, ref),
+    };
+    providers.register(lossy);
+    const d = await deposit();
+    const [att] = await attempts(d.id);
+    expect(att.provider_ref).toBeNull();
+    await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '10 minutes'`);
+    await reconcilePending({ pool, providers, secrets }, 300);
+    const after = await attempts(d.id);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ name: 'A', status: 'pending', submit_outcome: 'created' });
+    expect(after[0].provider_ref).toMatch(/^mock_/);
+    // Игрок всё-таки оплатил тот заказ — деньги зачислены, второго платежа не было.
+    await mock.complete(after[0].provider_ref, 'success');
+    expect((await tx(d.id)).status).toBe('success');
+  });
+
+  it('ответ потерян, провайдер подтвердил «такого платежа нет» — каскад на другой аккаунт разрешён', async () => {
     const accA = await account('A', 100);
     await account('B', 200);
     const real = new MockAdapter(mock);
@@ -284,11 +337,10 @@ describe.skipIf(!url)('Сквозной платёжный поток', () => {
       createPayment: async (c, r) => { if (c.accountId === failFor) throw new Error('ETIMEDOUT'); return real.createPayment(c, r); },
       getStatus: (c, ref) => real.getStatus(c, ref),
       verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b),
+      findPayment: async () => null,
     };
     providers.register(flaky);
     const d = await deposit();
-    expect(d).toMatchObject({ status: 'pending', paymentUrl: null });
-    expect((await attempts(d.id))[0].error).toMatch(/ETIMEDOUT/);
     failFor = null;
     await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '10 minutes'`);
     await reconcilePending({ pool, providers, secrets }, 300);

@@ -181,6 +181,13 @@ export class TestPayAdapter implements ProviderAdapter {
     return this.sim.payments.get(providerRef)?.amount ?? null;
   }
 
+  readonly paymentTtlSec = 1800;
+
+  async findPayment(_creds: AccountCredentials, reference: string): Promise<{ providerRef: string } | null> {
+    for (const p of this.sim.payments.values()) if (p.reference === reference) return { providerRef: p.id };
+    return null;
+  }
+
   async refund(_creds: AccountCredentials, req: RefundRequest): Promise<RefundResult> {
     const p = this.sim.payments.get(req.providerRef);
     if (!p || p.status !== 'success') return { kind: 'declined', reason: 'payment_not_found' };

@@ -115,6 +115,16 @@ export interface ProviderAdapter {
    *  Не прошёл проверку — InvalidWebhookError. */
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string,
     query?: Record<string, unknown>): VerifiedWebhook;
+  /**
+   * Сколько секунд неоплаченный заказ провайдера остаётся оплачиваемым. Если ответ на создание потерялся,
+   * после этого срока заказ гарантированно не оплатят — попытку можно закрыть. Нет значения — 24 часа.
+   */
+  readonly paymentTtlSec?: number;
+  /**
+   * Найти платёж по нашему ID попытки (reference), если провайдер это умеет. null — провайдер подтвердил,
+   * что такого платежа нет. Исключение — неизвестно (сеть). Нужен, чтобы разобрать потерянный ответ на создание.
+   */
+  findPayment?(creds: AccountCredentials, reference: string): Promise<{ providerRef: string } | null>;
   /** Возврат (полный или частичный) по успешной оплате — основа выплат по closed loop. */
   refund?(creds: AccountCredentials, req: RefundRequest): Promise<RefundResult>;
   /** Сколько фактически оплачено (в минорных единицах), если провайдер это сообщает. null — неизвестно. */

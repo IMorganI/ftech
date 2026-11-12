@@ -131,6 +131,13 @@ export class MockAdapter implements ProviderAdapter {
     return this.provider.status(providerRef);
   }
 
+  readonly paymentTtlSec = 1800;
+
+  async findPayment(_creds: AccountCredentials, reference: string): Promise<{ providerRef: string } | null> {
+    for (const p of this.provider.payments.values()) if (p.reference === reference) return { providerRef: p.ref };
+    return null;
+  }
+
   async refund(_creds: AccountCredentials, req: RefundRequest): Promise<RefundResult> {
     return this.provider.refund(req.providerRef, req.amount);
   }

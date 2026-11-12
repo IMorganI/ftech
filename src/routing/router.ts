@@ -46,7 +46,8 @@ export type DeclineCode =
   | 'player_limit_exceeded'
   | 'country_not_licensed'
   | 'no_route'
-  | 'all_attempts_failed';
+  | 'all_attempts_failed'
+  | 'provider_unavailable';
 
 export interface TransactionView {
   id: string;
@@ -303,7 +304,9 @@ async function insertAttempt(c: Client, txId: string, pick: Pick, no: number) {
 
 export type AttemptOutcome =
   | { status: 'success'; providerRef?: string; attemptId?: string }
-  | { status: 'declined'; providerRef?: string; error?: string; attemptId?: string };
+  | { status: 'declined'; providerRef?: string; error?: string; attemptId?: string;
+      /** Без каскада: платёж закрывается отказом с этим кодом (например, судьба прошлой отправки неизвестна). */
+      final?: DeclineCode };
 
 /**
  * Применяет результат текущей попытки. Повторный вызов для уже завершённого платежа ничего не меняет
@@ -365,7 +368,7 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
        WHERE t.id = $1 GROUP BY p.country, p.sticky_account_id, s.operator_id, o.max_attempts`, [txId],
     )).rows[0];
 
-    const next = attempt.attempt_no < ctx.max_attempts
+    const next = !outcome.final && attempt.attempt_no < ctx.max_attempts
       ? await pickAccount(c, {
           operatorId: ctx.operator_id, currency: tx.currency.trim(), country: ctx.country.trim(), amount,
           stickyAccountId: ctx.sticky_account_id, exclude: ctx.tried,
@@ -374,8 +377,9 @@ export async function resolveAttempt(pool: Pool, txId: string, outcome: AttemptO
 
     if (!next) {
       const done = toView((await c.query(
-        `UPDATE transactions SET status = 'declined', decline_code = 'all_attempts_failed', merchant_account_id = NULL,
-           updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`, [txId])).rows[0]);
+        `UPDATE transactions SET status = 'declined', decline_code = $2, merchant_account_id = NULL,
+           updated_at = now() WHERE id = $1 RETURNING ${TX_COLUMNS}`,
+        [txId, outcome.status === 'declined' && outcome.final ? outcome.final : 'all_attempts_failed'])).rows[0]);
       await enqueueSiteEvent(c, done, 'deposit.declined');
       return done;
     }

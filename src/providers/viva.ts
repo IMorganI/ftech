@@ -105,8 +105,12 @@ const VIVA_FIELDS: CredentialField[] = [
   { key: 'currency', label: 'Валюта аккаунта', default: 'EUR', required: true },
 ];
 
+/** Срок оплаты заказа Viva, секунды. Задаём явно: от него зависит, когда можно закрыть потерянную отправку. */
+export const VIVA_PAYMENT_TTL_SEC = 1800;
+
 export class VivaAdapter implements ProviderAdapter {
   readonly name = 'viva';
+  readonly paymentTtlSec = VIVA_PAYMENT_TTL_SEC;
   readonly manifest: ProviderManifest = {
     title: 'Viva Wallet (Smart Checkout)',
     summary: 'Европейский эквайер: игрок платит на странице Viva, карты к нам не попадают.',
@@ -203,6 +207,7 @@ export class VivaAdapter implements ProviderAdapter {
       amount: Number(req.amount),            // в минорных единицах (центах), как и у нас
       customerTrns: 'Пополнение счёта',
       merchantTrns: req.reference,           // наш ID попытки — вернётся в вебхуке и отчётах Viva
+      paymentTimeout: VIVA_PAYMENT_TTL_SEC,   // явный срок оплаты заказа: после него оплатить нельзя
     };
     if (c.sourceCode) body.sourceCode = c.sourceCode;
 

@@ -80,7 +80,7 @@ describe('Viva: адаптер', () => {
     const r = await new VivaAdapter({ fetch: v.fetch }).createPayment(creds, req());
     expect(r).toEqual({ kind: 'redirect', providerRef: '2271655739472609', redirectUrl: 'https://demo.vivapayments.com/web/checkout?ref=2271655739472609' });
     const order = v.calls.find((c) => c.url.endsWith('/checkout/v2/orders'))!;
-    expect(JSON.parse(order.body!)).toEqual({ amount: 2500, customerTrns: 'Пополнение счёта', merchantTrns: 'attempt-1', sourceCode: '1234' });
+    expect(JSON.parse(order.body!)).toEqual({ amount: 2500, customerTrns: 'Пополнение счёта', merchantTrns: 'attempt-1', paymentTimeout: 1800, sourceCode: '1234' });
     expect(order.headers.authorization).toBe('Bearer tok1');
   });
 
