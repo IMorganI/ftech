@@ -27,6 +27,8 @@ form input{flex:1;min-width:220px}.ok{color:var(--ok)}.bad{color:var(--bad)}.log
 
   app.get('/testpay', async (_req, reply) => {
     const keys = [...sim.keys.values()].reverse();
+    const disputed = new Set(sim.operations.filter((o) => o.type === 'chargeback').map((o) => o.paymentId));
+    const paid = [...sim.payments.values()].filter((p) => p.status === 'success' && !disputed.has(p.id)).reverse().slice(0, 10);
     const cards = keys.map((k) => {
       const ep = k.endpoint;
       const last = ep?.lastDelivery
@@ -47,7 +49,12 @@ form input{flex:1;min-width:220px}.ok{color:var(--ok)}.bad{color:var(--bad)}.log
 <div class="logo">TestPay</div><h1>Кабинет мерчанта (учебный)</h1>
 <p class="muted">Так выглядит подключение у большинства провайдеров: API-ключ → адрес вебхука → секрет подписи → тестовое событие. Денег здесь нет.</p>
 <form method="post" action="/testpay/keys"><button>Создать API-ключ</button></form>
-${cards || '<p class="muted">Ключей пока нет.</p>'}`));
+${cards || '<p class="muted">Ключей пока нет.</p>'}
+${paid.length ? `<div class="card"><b>Оплаты</b><div class="muted">«Оспорить» — как будто игрок пошёл в банк: в выписке появится чарджбэк.</div>
+${paid.map((p) => `<form method="post" action="/testpay/payments/${esc(p.id)}/dispute"><code>${esc(p.id)}</code>
+ <span>${esc(`${p.amount / 100n}.${(p.amount % 100n).toString().padStart(2, '0')} ${p.currency}`)}</span><button class="ghost">Оспорить</button></form>`).join('')}</div>` : ''}
+<div class="card"><b>Выписка</b><div class="muted">Скачай и загрузи в борде: «Контроль → Сверка с провайдером».</div>
+<a href="/testpay/report.csv" download="testpay-report.csv">Скачать выписку (CSV)</a></div>`));
   });
 
   app.post('/testpay/keys', async (_req, reply) => { sim.createKey(); return reply.redirect('/testpay', 303); });
@@ -70,6 +77,16 @@ ${cards || '<p class="muted">Ключей пока нет.</p>'}`));
     if (req.body?.key) sim.rollSecret(req.body.key);
     return reply.redirect('/testpay', 303);
   });
+
+  app.post<{ Params: { id: string } }>('/testpay/payments/:id/dispute', async (req, reply) => {
+    sim.dispute(req.params.id);
+    return reply.redirect('/testpay', 303);
+  });
+
+  app.get('/testpay/report.csv', async (_req, reply) => reply
+    .header('content-type', 'text/csv; charset=utf-8')
+    .header('content-disposition', 'attachment; filename="testpay-report.csv"')
+    .send(sim.reportCsv()));
 
   app.get<{ Params: { id: string } }>('/testpay/pay/:id', async (req, reply) => {
     const p = sim.payments.get(req.params.id);

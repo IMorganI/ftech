@@ -25,7 +25,18 @@ interface TestPayKey { key: string; createdAt: string; endpoint?: TestPayEndpoin
 export interface TestPayPayment {
   id: string; apiKey: string; reference: string; amount: bigint; currency: string; returnUrl: string | null;
   status: ProviderStatus; refunded: bigint;
+  createdAt: Date; paidAt?: Date;
 }
+
+/** Операция в выписке TestPay (как в отчёте из кабинета настоящего провайдера). */
+export interface TestPayOperation {
+  id: string; paymentId: string; type: 'payment' | 'refund' | 'chargeback'; status: 'completed' | 'failed';
+  amount: bigint; currency: string; fee: bigint; at: Date; caseId?: string; reasonCode?: string;
+}
+
+/** Комиссия TestPay в выписке: 1.9% от оплаты, 15.00 за чарджбэк. */
+export const TESTPAY_FEE_BPS = 190n;
+export const TESTPAY_CHARGEBACK_FEE = 1500n;
 
 /** Как симулятор доставляет вебхук: (адрес, заголовки, тело) → HTTP-статус ответа. */
 export type TestPayDeliver = (url: string, headers: Record<string, string>, body: string) => Promise<number>;
@@ -37,6 +48,7 @@ export function signTestPay(secret: string, body: string, ts = Math.floor(Date.n
 export class TestPaySimulator {
   readonly keys = new Map<string, TestPayKey>();
   readonly payments = new Map<string, TestPayPayment>();
+  readonly operations: TestPayOperation[] = [];
   deliver: TestPayDeliver | null = null;
 
   /** stateFile — где хранить ключи и вебхуки между перезапусками (в разработке); без него — только в памяти. */
@@ -91,9 +103,29 @@ export class TestPaySimulator {
   create(apiKey: string, req: CreatePaymentRequest): TestPayPayment {
     const id = `tp_pay_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
     const p: TestPayPayment = { id, apiKey, reference: req.reference, amount: req.amount, currency: req.currency,
-      returnUrl: req.returnUrl, status: 'pending', refunded: 0n };
+      returnUrl: req.returnUrl, status: 'pending', refunded: 0n, createdAt: new Date() };
     this.payments.set(id, p);
     return p;
+  }
+
+  /** Игрок оспорил оплату через банк: в выписке появится строка chargeback (сумма + комиссия). */
+  dispute(id: string, reasonCode = '10.4'): TestPayOperation | null {
+    const p = this.payments.get(id);
+    if (!p || p.status !== 'success') return null;
+    const op: TestPayOperation = { id: `tp_cb_${randomUUID().slice(0, 8)}`, paymentId: p.id, type: 'chargeback', status: 'completed',
+      amount: p.amount - p.refunded, currency: p.currency, fee: TESTPAY_CHARGEBACK_FEE, at: new Date(),
+      caseId: `CB-${randomUUID().slice(0, 6).toUpperCase()}`, reasonCode };
+    this.operations.push(op);
+    return op;
+  }
+
+  /** Выписка в CSV — как «Export» в кабинете провайдера. Суммы в единицах валюты (12.50). */
+  reportCsv(apiKey?: string): string {
+    const dec = (c: bigint) => `${c / 100n}.${(c % 100n).toString().padStart(2, '0')}`;
+    const rows = this.operations.filter((o) => !apiKey || this.payments.get(o.paymentId)?.apiKey === apiKey);
+    return ['Transaction ID,Payment ID,Type,Status,Amount,Currency,Fee,Date,Case ID,Reason Code',
+      ...rows.map((o) => [o.id, o.paymentId, o.type, o.status, (o.type === 'payment' ? '' : '-') + dec(o.amount), o.currency, dec(o.fee),
+        o.at.toISOString(), o.caseId ?? '', o.reasonCode ?? ''].join(','))].join('\n') + '\n';
   }
 
   async complete(id: string, outcome: 'success' | 'declined'): Promise<TestPayPayment | null> {
@@ -101,6 +133,10 @@ export class TestPaySimulator {
     if (!p) return null;
     if (p.status !== 'pending') return p;
     p.status = outcome;
+    p.paidAt = new Date();
+    this.operations.push({ id: `tp_op_${randomUUID().slice(0, 12)}`, paymentId: p.id, type: 'payment',
+      status: outcome === 'success' ? 'completed' : 'failed', amount: p.amount, currency: p.currency,
+      fee: outcome === 'success' ? (p.amount * TESTPAY_FEE_BPS) / 10000n : 0n, at: p.paidAt });
     await this.sendEvent(p.apiKey, outcome === 'success' ? 'payment.succeeded' : 'payment.failed',
       { payment_id: p.id, reference: p.reference, amount: p.amount, currency: p.currency });
     return p;
@@ -190,7 +226,10 @@ export class TestPayAdapter implements ProviderAdapter {
     if (!p || p.status !== 'success') return { kind: 'declined', reason: 'payment_not_found' };
     if (p.refunded + req.amount > p.amount) return { kind: 'declined', reason: 'amount_exceeds_payment' };
     p.refunded += req.amount;
-    return { kind: 'success', refundRef: `tp_re_${randomUUID().slice(0, 8)}` };
+    const refundRef = `tp_re_${randomUUID().slice(0, 8)}`;
+    this.sim.operations.push({ id: refundRef, paymentId: p.id, type: 'refund', status: 'completed', amount: req.amount,
+      currency: p.currency, fee: 0n, at: new Date() });
+    return { kind: 'success', refundRef };
   }
 
   verifyWebhook(creds: AccountCredentials, headers: Record<string, string | string[] | undefined>, rawBody: string): VerifiedWebhook {

@@ -76,6 +76,33 @@ export async function collectAlerts(pool: Pool, boardUrl: string): Promise<Alert
      WHERE ${sent} LIMIT 20`)).rows) {
     out.push({ key: r.key, text: `🔌 Провайдер не отвечает: аккаунт «${r.name}», ${r.n} сбо(я/ев) за 15 минут.\nПоследняя ошибка: ${String(r.error).slice(0, 200)}\nПлатежи ждут сверки. ${boardUrl}#payments` });
   }
+  // Новый чарджбэк и приближающийся срок ответа.
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'chargeback:' || cb.id AS key, cb.amount, cb.currency, cb.reason_code, cb.respond_by, m.name, p.external_id AS player
+       FROM chargebacks cb JOIN merchant_accounts m ON m.id = cb.merchant_account_id JOIN transactions t ON t.id = cb.transaction_id
+       JOIN players p ON p.id = t.player_id WHERE cb.opened_at > now() - interval '7 days') k
+     WHERE ${sent} LIMIT 20`)).rows) {
+    out.push({ key: r.key, text: `💳 Чарджбэк ${money(r.amount, r.currency)}: игрок ${r.player}, аккаунт «${r.name}»${r.reason_code ? `, код ${r.reason_code}` : ''}${r.respond_by ? `. Ответить до ${new Date(r.respond_by).toLocaleDateString('ru-RU')}` : ''}.
+${boardUrl}#chargebacks` });
+  }
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'cb_deadline:' || cb.id AS key, cb.amount, cb.currency, cb.respond_by
+       FROM chargebacks cb WHERE cb.status = 'open' AND cb.respond_by IS NOT NULL
+         AND cb.respond_by <= (now() AT TIME ZONE 'UTC')::date + 2) k
+     WHERE ${sent} LIMIT 20`)).rows) {
+    out.push({ key: r.key, text: `⏰ Срок ответа по чарджбэку ${money(r.amount, r.currency)} — ${new Date(r.respond_by).toLocaleDateString('ru-RU')}. Не ответишь — спор проигран.
+${boardUrl}#chargebacks` });
+  }
+  // Выписка провайдера с серьёзными расхождениями.
+  for (const r of (await pool.query(
+    `SELECT * FROM (SELECT 'report:' || r.id AS key, r.filename, m.name, (r.summary->>'bad')::int AS bad
+       FROM report_imports r JOIN merchant_accounts m ON m.id = r.merchant_account_id
+       WHERE (r.summary->>'bad')::int > 0 AND r.uploaded_at > now() - interval '7 days') k
+     WHERE ${sent} LIMIT 10`)).rows) {
+    out.push({ key: r.key, text: `🧾 Сверка «${r.filename}» (аккаунт «${r.name}»): ${r.bad} серьёзн. расхождени(е/й) с провайдером.
+${boardUrl}#reconciliation` });
+  }
+
   // Отправка не подтверждена дольше 10 минут: деньги в подвешенном состоянии.
   for (const r of (await pool.query(
     `SELECT * FROM (SELECT 'stuck_submit:' || a.id AS key, t.amount, t.currency, m.name, a.error

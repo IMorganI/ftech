@@ -119,9 +119,11 @@ async function insertPayout(c: Client, req: PayoutRequest, h: string): Promise<s
 
   // Раскладка по депозитам: от новых к старым (у новых больше шансов, что провайдер ещё разрешает возврат).
   const deposits = (await c.query(
-    `SELECT t.id, t.amount - t.refunded_amount AS available, t.merchant_account_id
+    // Оспоренная (чарджбэк) часть депозита на карту не возвращается — игрок получил её через банк.
+    `SELECT t.id, t.amount - t.refunded_amount - t.charged_back_amount AS available, t.merchant_account_id
      FROM transactions t
-     WHERE t.player_id = $1 AND t.type = 'deposit' AND t.status = 'success' AND t.currency = $2 AND t.refunded_amount < t.amount
+     WHERE t.player_id = $1 AND t.type = 'deposit' AND t.status = 'success' AND t.currency = $2
+       AND t.refunded_amount + t.charged_back_amount < t.amount
      ORDER BY t.created_at DESC FOR UPDATE`, [player.id, req.currency])).rows;
 
   let remaining = req.amount;

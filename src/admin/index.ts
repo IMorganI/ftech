@@ -6,6 +6,7 @@ import { adminApiRoutes } from './api.js';
 import { connectionRoutes } from './connections.js';
 import { analyticsRoutes } from './analytics.js';
 import { insightRoutes } from './insight.js';
+import { moneyControlRoutes } from './money-control.js';
 import type { ProviderRegistry } from '../providers/types.js';
 import type { SecretStore } from '../secrets.js';
 
@@ -36,6 +37,7 @@ export async function adminPlugin(app: FastifyInstance, d: AdminDeps & { provide
   await app.register(adminApiRoutes, d);
   await app.register(analyticsRoutes, d);
   await app.register(insightRoutes, d);
+  await app.register(moneyControlRoutes, d);
   if (d.providers && d.secrets) {
     await app.register(connectionRoutes, { ...d, providers: d.providers, secrets: d.secrets, webhookBaseUrl: d.webhookBaseUrl ?? 'http://localhost:3000' });
   }
