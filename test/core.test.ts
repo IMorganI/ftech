@@ -9,7 +9,8 @@ import { generateApiKey } from '../src/auth.js';
 import { ProviderRegistry } from '../src/providers/types.js';
 import { MockAdapter, MockProvider } from '../src/providers/mock.js';
 import { MapSecretStore } from '../src/secrets.js';
-import { processInbox } from '../src/payments/flow.js';
+import { processInbox, reconcilePending } from '../src/payments/flow.js';
+import { routeDeposit } from '../src/routing/router.js';
 import { approveManualLeg, completeManualLeg } from '../src/payouts/payouts.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 
@@ -346,6 +347,83 @@ describe.skipIf(!url)('Ядро', () => {
       await mock.complete(d.paymentUrl.split('/').pop(), 'success');
       expect(await status(d.id)).toBe('success');
       expect(await issues()).toEqual([]);
+    });
+  });
+
+  // ---------- 7. сбои ----------
+
+  describe('сбои: перезапуск, гонки, повторы', () => {
+    const secrets = new MapSecretStore({ MOCK: 'test-secret' });
+    const deps = () => ({ pool, providers, secrets });
+    const attemptsOf = async (txId: string) => (await pool.query(
+      `SELECT a.*, m.name FROM transaction_attempts a JOIN merchant_accounts m ON m.id = a.merchant_account_id
+       WHERE transaction_id = $1 ORDER BY attempt_no`, [txId])).rows;
+
+    /** Процесс упал ПОСЛЕ того, как провайдер создал платёж, но ДО записи ответа в базу. */
+    async function crashAfterProviderCall() {
+      const siteRow = (await pool.query(`SELECT id FROM sites`)).rows[0];
+      const { tx } = await routeDeposit(pool, { siteId: siteRow.id, operatorId: op, idempotencyKey: `crash-${++n}-xxxx`,
+        amount: 1000n, currency: 'EUR', player: { externalId: 'p1', country: 'MT' } });
+      const [att] = await attemptsOf(tx.id);
+      await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '10 minutes' WHERE id = $1`, [att.id]);
+      const created = await new MockAdapter(mock).createPayment({ accountId: att.merchant_account_id, secret: 'test-secret' },
+        { reference: att.id, amount: 1000n, currency: 'EUR', country: 'MT', returnUrl: null });
+      return { txId: tx.id, ref: created.kind === 'redirect' ? created.providerRef : '' };
+    }
+
+    it('падение между созданием платежа у провайдера и записью: сверка находит платёж по нашему ID, второго нет', async () => {
+      await account('A'); await account('B');
+      const { txId, ref } = await crashAfterProviderCall();
+      await reconcilePending(deps(), 300);
+      const a = await attemptsOf(txId);
+      expect(a).toHaveLength(1);
+      expect(a[0]).toMatchObject({ provider_ref: ref, submit_outcome: 'created', status: 'pending' });
+      await mock.complete(ref, 'success');
+      expect((await pool.query(`SELECT status FROM transactions WHERE id = $1`, [txId])).rows[0].status).toBe('success');
+    });
+
+    it('то же, но провайдер не умеет искать: без каскада до истечения срока оплаты', async () => {
+      await account('A'); await account('B');
+      const real = new MockAdapter(mock);
+      providers.register({ name: 'mock', manifest: real.manifest, paymentTtlSec: 1800,
+        createPayment: (c, r) => real.createPayment(c, r), getPayment: (c, r) => real.getPayment(c, r),
+        verifyWebhook: (c, h, b) => real.verifyWebhook(c, h, b) });
+      const { txId } = await crashAfterProviderCall();
+      await reconcilePending(deps(), 300);
+      expect((await attemptsOf(txId)).map((x) => x.status)).toEqual(['pending']);
+      await pool.query(`UPDATE transaction_attempts SET submitted_at = now() - interval '35 minutes'`);
+      await reconcilePending(deps(), 300);
+      expect((await attemptsOf(txId)).map((x) => x.status)).toEqual(['declined']);
+      expect((await pool.query(`SELECT decline_code FROM transactions WHERE id = $1`, [txId])).rows[0].decline_code).toBe('provider_unavailable');
+    });
+
+    it('одно событие провайдера пришло 5 раз одновременно — зачислено ровно один раз', async () => {
+      await account();
+      const d = (await deposit(1000)).json();
+      const ref = d.paymentUrl.split('/').pop();
+      const p = mock.payments.get(ref)!;
+      p.status = 'success';
+      await Promise.all([1, 2, 3, 4, 5].map(() => mock.sendWebhook(p, 'evt-same')));
+      expect((await pool.query(`SELECT status FROM transactions WHERE id = $1`, [d.id])).rows[0].status).toBe('success');
+      expect((await pool.query(`SELECT count(*)::int c FROM ledger_entries`)).rows[0].c).toBe(2);
+      expect((await pool.query(`SELECT count(*)::int c FROM provider_webhook_events`)).rows[0].c).toBe(1);
+    });
+
+    it('параллельные выплаты разных выводов не возвращают депозит больше его суммы', async () => {
+      await account();
+      const d = (await deposit(5000)).json();
+      await mock.complete(d.paymentUrl.split('/').pop(), 'success');
+      const rs = await Promise.all([1, 2, 3, 4, 5].map((i) => app.inject({
+        method: 'POST', url: '/v1/payouts', headers: { authorization: `Bearer ${key}`, 'idempotency-key': `par-w-000${i}` },
+        payload: { amount: 3000, currency: 'EUR', withdrawalId: `W-${i}`, player: { id: 'p1' } } })));
+      expect(rs.every((r) => r.statusCode === 201)).toBe(true);
+      const refunded = (await pool.query(`SELECT refunded_amount FROM transactions WHERE id = $1`, [d.id])).rows[0].refunded_amount;
+      expect(refunded).toBe(5000n);
+      const legs = (await pool.query(`SELECT kind, sum(amount)::bigint s FROM payout_legs GROUP BY kind ORDER BY kind`)).rows;
+      expect(legs.map((l) => [l.kind, l.s])).toEqual([['refund', 5000n], ['manual', 10000n]]);
+      // Проводки по каждой выплате сходятся в ноль.
+      const unbalanced = (await pool.query(`SELECT transaction_id FROM ledger_entries GROUP BY transaction_id HAVING sum(amount) <> 0`)).rows;
+      expect(unbalanced).toEqual([]);
     });
   });
 });
