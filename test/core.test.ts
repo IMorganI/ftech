@@ -10,6 +10,7 @@ import { ProviderRegistry } from '../src/providers/types.js';
 import { MockAdapter, MockProvider } from '../src/providers/mock.js';
 import { MapSecretStore } from '../src/secrets.js';
 import { processInbox } from '../src/payments/flow.js';
+import { approveManualLeg, completeManualLeg } from '../src/payouts/payouts.js';
 import type { ProviderAdapter } from '../src/providers/types.js';
 
 const url = process.env.TEST_DATABASE_URL;
@@ -32,7 +33,7 @@ describe.skipIf(!url)('Ядро', () => {
   afterAll(async () => { await app?.close(); await pool?.end(); });
 
   beforeEach(async () => {
-    await pool.query(`TRUNCATE player_restriction_events, payout_legs, reconciliation_issues, webhook_deliveries, provider_webhook_log,
+    await pool.query(`TRUNCATE audit_log, admin_sessions, admin_users, player_restriction_events, payout_legs, reconciliation_issues, webhook_deliveries, provider_webhook_log,
       provider_webhook_events, ledger_entries, transaction_attempts, transactions, account_usage, players, merchant_accounts, sites,
       providers, operators CASCADE`);
     op = (await pool.query(`INSERT INTO operators (name, licenses, kyc_required_above, max_attempts, payout_kyc_required)
@@ -220,6 +221,88 @@ describe.skipIf(!url)('Ядро', () => {
       expect((await deposit(3000)).json().declineCode).toBe('no_route');
       const rows = (await pool.query(`SELECT currency, reserved FROM account_usage WHERE merchant_account_id = $1 ORDER BY currency`, [acc])).rows;
       expect(rows.map((r) => [r.currency, r.reserved])).toEqual([['EUR', 8000n], ['USD', 8000n]]);
+    });
+  });
+
+  // ---------- 5. контроль выплат ----------
+
+  describe('контроль выплат', () => {
+    const payout = (amount: number, withdrawalId: string, idem = `po-${++n}-${Date.now()}`) => app.inject({
+      method: 'POST', url: '/v1/payouts', headers: { authorization: `Bearer ${key}`, 'idempotency-key': idem },
+      payload: { amount, currency: 'EUR', withdrawalId, player: { id: 'p1' } },
+    });
+    async function paidDeposit(amount: number) {
+      await account();
+      const d = (await deposit(amount)).json();
+      await mock.complete(d.paymentUrl.split('/').pop(), 'success');
+      return d.id as string;
+    }
+    async function users() {
+      const ids: string[] = [];
+      for (const e of ['a@x.io', 'b@x.io']) {
+        ids.push((await pool.query(`INSERT INTO admin_users (email, password_hash, role, must_change_password) VALUES ($1, 'x', 'operator', false) RETURNING id`, [e])).rows[0].id);
+      }
+      return ids as [string, string];
+    }
+    const manualLeg = async (payoutId: string) => (await pool.query(`SELECT id FROM payout_legs WHERE payout_id = $1 AND kind = 'manual'`, [payoutId])).rows[0].id;
+
+    it('withdrawalId обязателен; один вывод — одна выплата, даже с другим Idempotency-Key', async () => {
+      await paidDeposit(5000);
+      const noId = await app.inject({ method: 'POST', url: '/v1/payouts', headers: { authorization: `Bearer ${key}`, 'idempotency-key': 'po-no-id-1' },
+        payload: { amount: 1000, currency: 'EUR', player: { id: 'p1' } } });
+      expect(noId.statusCode).toBe(400);
+      const first = await payout(1000, 'W-1', 'po-key-0001');
+      expect(first.statusCode).toBe(201);
+      expect(first.json().withdrawalId).toBe('W-1');
+      expect((await payout(1000, 'W-1', 'po-key-0001')).statusCode).toBe(200); // повтор того же запроса
+      const dup = await payout(1000, 'W-1', 'po-key-0002');
+      expect(dup.statusCode).toBe(409);
+      expect(dup.json().error).toMatchObject({ code: 'duplicate_withdrawal', details: { payoutId: first.json().id } });
+      expect((await pool.query(`SELECT count(*)::int c FROM transactions WHERE type = 'payout'`)).rows[0].c).toBe(1);
+    });
+
+    it('параллельные запросы одного вывода с разными ключами — ровно одна выплата', async () => {
+      await paidDeposit(5000);
+      const rs = await Promise.all([1, 2, 3, 4, 5].map((i) => payout(4000, 'W-par', `po-par-000${i}`)));
+      expect(rs.map((r) => r.statusCode).sort()).toEqual([201, 409, 409, 409, 409]);
+      expect((await pool.query(`SELECT sum(refunded_amount)::bigint s FROM transactions WHERE type = 'deposit'`)).rows[0].s).toBe(4000n);
+    });
+
+    it('лимит одной выплаты оператора', async () => {
+      await pool.query(`UPDATE operators SET payout_max_amount = 2000`);
+      await paidDeposit(5000);
+      expect((await payout(2500, 'W-big')).json()).toMatchObject({ status: 'declined', declineCode: 'amount_over_limit' });
+      expect((await payout(2000, 'W-ok')).json().status).toBe('success');
+    });
+
+    it('ручная выплата от порога: одобряет один, отмечает выполненной другой; номер перевода обязателен', async () => {
+      await pool.query(`UPDATE operators SET manual_approval_above = 1000`);
+      await paidDeposit(1000);
+      const po = (await payout(6000, 'W-man')).json();
+      const leg = await manualLeg(po.id);
+      const [a, b] = await users();
+      await expect(completeManualLeg(pool, leg, { userId: a }, { reference: 'SEPA-1', note: '' })).rejects.toMatchObject({ code: 'approval_required' });
+      await approveManualLeg(pool, leg, { userId: a });
+      await expect(approveManualLeg(pool, leg, { userId: b })).rejects.toMatchObject({ code: 'already_approved' });
+      await expect(completeManualLeg(pool, leg, { userId: a }, { reference: 'SEPA-1', note: '' })).rejects.toMatchObject({ code: 'same_person' });
+      const tx = await completeManualLeg(pool, leg, { userId: b }, { reference: 'SEPA-1', note: 'IBAN игрока' });
+      expect(tx.status).toBe('success');
+      const row = (await pool.query(`SELECT approved_by, completed_by, reference FROM payout_legs WHERE id = $1`, [leg])).rows[0];
+      expect(row).toEqual({ approved_by: a, completed_by: b, reference: 'SEPA-1' });
+      const log = (await pool.query(`SELECT action, admin_user_id FROM audit_log ORDER BY id`)).rows;
+      expect(log).toEqual([{ action: 'payout.manual_approve', admin_user_id: a }, { action: 'payout.manual_complete', admin_user_id: b }]);
+      // Даже напрямую в базе один человек не может быть и одобрившим, и исполнившим.
+      await expect(pool.query(`UPDATE payout_legs SET completed_by = approved_by WHERE id = $1`, [leg])).rejects.toThrow(/maker_checker/);
+    });
+
+    it('ниже порога одобрение не нужно', async () => {
+      await pool.query(`UPDATE operators SET manual_approval_above = 100000`);
+      await paidDeposit(1000);
+      const po = (await payout(3000, 'W-small')).json();
+      const leg = await manualLeg(po.id);
+      const [a] = await users();
+      await expect(approveManualLeg(pool, leg, { userId: a })).rejects.toMatchObject({ code: 'approval_not_needed' });
+      expect((await completeManualLeg(pool, leg, { userId: a }, { reference: 'SEPA-2', note: '' })).status).toBe('success');
     });
   });
 });

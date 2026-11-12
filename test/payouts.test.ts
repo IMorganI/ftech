@@ -63,7 +63,7 @@ describe.skipIf(!url)('Выплаты', () => {
     return d.id as string;
   }
   const payout = (amount: number, player = 'p1', extra: object = {}, idem?: string) =>
-    post('/v1/payouts', { amount, currency: 'EUR', player: { id: player, ...extra } }, idem);
+    post('/v1/payouts', { amount, currency: 'EUR', withdrawalId: `w-${idem ?? Math.random().toString(36).slice(2)}`, player: { id: player, ...extra } }, idem);
   const refunded = async (id: string) => (await pool.query(`SELECT refunded_amount FROM transactions WHERE id = $1`, [id])).rows[0].refunded_amount;
   const ledgerSum = async (txId: string) => (await pool.query(`SELECT coalesce(sum(amount),0)::bigint s FROM ledger_entries WHERE transaction_id = $1`, [txId])).rows[0].s;
 
@@ -100,12 +100,12 @@ describe.skipIf(!url)('Выплаты', () => {
     const leg = (await pool.query(`SELECT id FROM payout_legs WHERE payout_id = $1 AND kind = 'manual'`, [r.id])).rows[0].id;
     await pool.query(`INSERT INTO admin_users (email, password_hash, role, must_change_password) VALUES ('o@x.io', 'x', 'operator', false)`);
     const admin = (await pool.query(`SELECT id FROM admin_users`)).rows[0].id;
-    const tx = await completeManualLeg(pool, leg, admin, 'SEPA перевод №123');
+    const tx = await completeManualLeg(pool, leg, { userId: admin }, { reference: 'SEPA №123', note: '' });
     expect(tx!.status).toBe('success');
     expect(await ledgerSum(r.id)).toBe(0n);
     const entries = (await pool.query(`SELECT account, amount FROM ledger_entries WHERE transaction_id = $1 ORDER BY id`, [r.id])).rows;
     expect(entries.map((e) => `${e.account.split(':')[0]}:${e.amount}`)).toEqual(['merchant:-1000', 'player:1000', 'manual:-3000', 'player:3000']);
-    expect(await completeManualLeg(pool, leg, admin, 'ещё раз')).toBeNull(); // повторно не отмечается
+    await expect(completeManualLeg(pool, leg, { userId: admin }, { reference: 'ещё раз', note: '' })).rejects.toThrow(/не найдена/); // повторно не отмечается
   });
 
   it('повторные выплаты не возвращают депозит больше его суммы', async () => {
@@ -190,7 +190,7 @@ describe.skipIf(!url)('Выплаты', () => {
     const list = (await app.inject({ method: 'GET', url: '/admin/v1/manual-payouts', cookies: { ftech_admin: cookie } })).json();
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ amount: '1500', player: 'p1', site: 'casino' });
-    const done = await app.inject({ method: 'POST', url: `/admin/v1/manual-payouts/${list[0].id}/complete`, payload: { note: 'Перевод на IBAN игрока' }, cookies: { ftech_admin: cookie } });
+    const done = await app.inject({ method: 'POST', url: `/admin/v1/manual-payouts/${list[0].id}/complete`, payload: { reference: 'SEPA-2026-0001', note: 'Перевод на IBAN игрока' }, cookies: { ftech_admin: cookie } });
     expect(done.json()).toEqual({ ok: true, payoutStatus: 'success' });
     expect((await pool.query(`SELECT action FROM audit_log WHERE action = 'payout.manual_complete'`)).rows).toHaveLength(1);
     const detail = (await app.inject({ method: 'GET', url: `/admin/v1/transactions/${po.id}`, cookies: { ftech_admin: cookie } })).json();

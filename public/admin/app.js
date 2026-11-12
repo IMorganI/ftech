@@ -737,23 +737,39 @@ function viewSandbox(main) {
 async function viewManual(main) {
   const all = !!state.cache.manualAll;
   const rows = await api('GET', `/admin/v1/manual-payouts${all ? '?all=true' : ''}`);
+  const statusCell = (r) => {
+    if (r.status === 'success') return h('div', null, h('span', { class: 'pill ok' }, 'выплачено'),
+      h('div', { class: 'note' }, `${r.completed_by || ''} · № ${r.reference || '—'}${r.note ? ` · ${r.note}` : ''}`),
+      r.approved_by ? h('div', { class: 'note' }, `одобрил ${r.approved_by}`) : null);
+    if (!can('operator')) return h('span', { class: 'pill warn' }, 'ждёт');
+    // Сумма от порога оператора: сначала одобряет один сотрудник, выполненной отмечает другой.
+    if (r.needs_approval && !r.approved_by) return h('div', { class: 'stack' },
+      h('span', { class: 'pill warn' }, 'нужно одобрение'),
+      h('div', { class: 'note' }, 'Крупная сумма: одобряет один сотрудник, переводит и отмечает — другой.'),
+      actionForm({ class: 'row start' }, [h('button', { class: 'sm primary', type: 'submit' }, 'Одобрить выплату')],
+        async () => { await api('POST', `/admin/v1/manual-payouts/${r.id}/approve`); renderShell(); }));
+    const mine = r.needs_approval && r.approved_by_id === state.me.id;
+    return h('div', { class: 'stack' },
+      r.approved_by ? h('div', { class: 'note' }, `✓ одобрил ${r.approved_by} ${when(r.approved_at)}`) : null,
+      mine ? h('div', { class: 'note' }, 'Ты одобрил эту выплату — отметить выполненной должен другой сотрудник.')
+        : actionForm({ class: 'row start' }, [
+          h('input', { name: 'reference', required: true, minlength: 3, placeholder: '№ перевода / платёжки', style: 'width:180px' }),
+          h('input', { name: 'note', placeholder: 'Комментарий (необязательно)', style: 'width:180px' }),
+          h('button', { class: 'sm primary', type: 'submit' }, 'Выплачено'),
+        ], async (v) => { await api('POST', `/admin/v1/manual-payouts/${r.id}/complete`, v); renderShell(); }));
+  };
   put(main, h('section', { class: 'panel' },
     h('div', { class: 'row' }, h('h2', null, 'Ручные выплаты'),
       h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.manualAll = e.target.checked; renderShell(); } }), 'Показать выполненные')),
-    h('p', { class: 'note' }, 'Выигрыш сверх депозитов игрока нельзя вернуть на карту — его выплачивает оператор сам (перевод на счёт или карту игрока). Переведи деньги, затем отметь выплату здесь: сайт получит уведомление, что выплата завершена.'),
+    h('p', { class: 'note' }, 'Выигрыш сверх депозитов игрока нельзя вернуть на карту — его выплачивает оператор сам (перевод на счёт или карту игрока). Переведи деньги и отметь выплату с номером перевода: сайт получит уведомление, что выплата завершена.'),
     rows.length ? h('div', { class: 'tbl' }, h('table', null,
-      h('thead', null, h('tr', null, ['Когда', 'Сайт', 'Игрок', 'К выплате', 'Из выплаты', 'Статус'].map((t) => h('th', null, t)))),
+      h('thead', null, h('tr', null, ['Когда', 'Сайт', 'Игрок', 'К выплате', 'Вывод казино', 'Статус'].map((t) => h('th', null, t)))),
       h('tbody', null, rows.map((r) => h('tr', null,
         h('td', { class: 'n' }, when(r.created_at)), h('td', null, r.site), h('td', { class: 'n' }, `${r.player} · ${r.country}`),
         h('td', { class: 'n' }, h('b', null, money(r.amount, r.currency))),
-        h('td', { class: 'n dim' }, h('button', { class: 'link', onclick: () => { state.cache.selTx = r.payout_id; state.tab = 'payments'; location.hash = 'payments'; renderShell(); } }, money(r.payout_amount, r.currency))),
-        h('td', null, r.status === 'success'
-          ? h('div', null, h('span', { class: 'pill ok' }, 'выплачено'), h('div', { class: 'note' }, `${r.completed_by || ''}: ${r.note || ''}`))
-          : can('operator') ? actionForm({ class: 'row start' }, [
-            h('input', { name: 'note', required: true, minlength: 3, placeholder: 'Как выплатили (№ перевода)', style: 'width:220px' }),
-            h('button', { class: 'sm primary', type: 'submit' }, 'Выплачено'),
-          ], async (v) => { await api('POST', `/admin/v1/manual-payouts/${r.id}/complete`, v); renderShell(); })
-          : h('span', { class: 'pill warn' }, 'ждёт'))))))) : h('p', { class: 'note' }, all ? 'Ручных выплат не было.' : 'Нет выплат, ожидающих оператора.')));
+        h('td', { class: 'n dim' }, h('button', { class: 'link', onclick: () => { state.cache.selTx = r.payout_id; state.tab = 'payments'; location.hash = 'payments'; renderShell(); } },
+          r.withdrawal_id || money(r.payout_amount, r.currency)), h('div', { class: 'note' }, `всего ${money(r.payout_amount, r.currency)}`)),
+        h('td', null, statusCell(r))))))) : h('p', { class: 'note' }, all ? 'Ручных выплат не было.' : 'Нет выплат, ожидающих оператора.')));
 }
 
 // ---------- расхождения ----------
@@ -848,7 +864,22 @@ async function viewOperator(main, opId) {
         h('label', { class: 'check' }, 'Комиссия платформы',
           h('input', { name: 'fee', type: 'number', min: 0, max: 100, step: 0.01, value: o.platform_fee_bps / 100, style: 'width:90px' }), '%'),
         h('button', { class: 'sm', type: 'submit' }, 'Сохранить'),
-      ], async (v) => { await api('PATCH', `/admin/v1/operators/${opId}`, { platformFeeBps: Math.round(Number(v.fee) * 100) }); renderShell(); }) : null),
+      ], async (v) => { await api('PATCH', `/admin/v1/operators/${opId}`, { platformFeeBps: Math.round(Number(v.fee) * 100) }); renderShell(); }) : null,
+      can('admin') ? h('details', null, h('summary', null, 'Правила выплат и ответственной игры'),
+        actionForm({ class: 'form', style: 'margin-top:12px' }, [
+          field('Максимум одной выплаты', [h('input', { name: 'max', inputmode: 'decimal', placeholder: 'без ограничения', value: o.payout_max_amount ? (Number(o.payout_max_amount) / 100).toString() : '' }),
+            h('span', { class: 'help' }, 'Больше — выплата отклоняется (amount_over_limit)')]),
+          field('Ручная выплата от суммы — вторым сотрудником', [h('input', { name: 'approval', inputmode: 'decimal', placeholder: 'не требуется', value: o.manual_approval_above !== null && o.manual_approval_above !== undefined ? (Number(o.manual_approval_above) / 100).toString() : '' }),
+            h('span', { class: 'help' }, 'Одобряет один, переводит и отмечает другой. 0 — для всех ручных выплат')], 'wide'),
+          field('Повышение лимита игрока вступает через, ч', [h('input', { name: 'delay', type: 'number', min: 0, max: 720, value: o.limit_increase_delay_hours ?? 24 }),
+            h('span', { class: 'help' }, 'Снижение — сразу. Обычно требуют 24 ч')]),
+          h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Сохранить')),
+        ], async (v) => {
+          const opt = (x) => (x.trim() === '' ? null : x.trim() === '0' ? 0 : toCents(x));
+          await api('PATCH', `/admin/v1/operators/${opId}`, { payoutMaxAmount: v.max.trim() === '' ? null : toCents(v.max),
+            manualApprovalAbove: opt(v.approval), limitIncreaseDelayHours: Number(v.delay) });
+          renderShell();
+        })) : null),
     h('section', { class: 'panel' }, h('h2', null, 'Что нужно для приёма платежей'), checklist),
     h('section', { class: 'panel' },
       h('h2', null, 'Платёжные аккаунты'),

@@ -59,6 +59,8 @@ export interface TransactionView {
   status: 'created' | 'pending' | 'success' | 'declined' | 'failed';
   merchantAccountId: string | null;
   declineCode: string | null;
+  /** Для выплат: ID вывода в системе казино. */
+  withdrawalId?: string | null;
   /** Куда отправить игрока для оплаты (страница провайдера), пока платёж ожидает оплаты. */
   paymentUrl: string | null;
   createdAt: Date;
@@ -89,12 +91,12 @@ interface Pick {
   reason: string;
 }
 
-const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, created_at, updated_at`;
+const TX_COLUMNS = `id, site_id, player_id, type, amount, currency, status, merchant_account_id, decline_code, withdrawal_id, created_at, updated_at`;
 
 function toView(r: Record<string, any>): TransactionView {
   return {
     id: r.id, siteId: r.site_id, playerId: r.player_id, type: r.type, amount: r.amount, currency: r.currency,
-    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code,
+    status: r.status, merchantAccountId: r.merchant_account_id, declineCode: r.decline_code, withdrawalId: r.withdrawal_id ?? null,
     paymentUrl: r.payment_url ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }

@@ -254,7 +254,7 @@ describe.skipIf(!url)('Viva: сквозной платёж через роуте
     await hook('2271655739472609');
     const po = (await app.inject({ method: 'POST', url: '/v1/payouts',
       headers: { authorization: `Bearer ${key}`, 'idempotency-key': 'viva-payout-1' },
-      payload: { amount: 1500, currency: 'EUR', player: { id: 'p1' } } })).json();
+      payload: { amount: 1500, currency: 'EUR', withdrawalId: 'w-1', player: { id: 'p1' } } })).json();
     expect(po).toMatchObject({ status: 'success', refundAmount: '1500', manualAmount: '0' });
     expect(v.refunds.get('2271655739472609')).toBe(1500);
     expect((await pool.query(`SELECT refunded_amount FROM transactions WHERE id = $1`, [d.id])).rows[0].refunded_amount).toBe(1500n);

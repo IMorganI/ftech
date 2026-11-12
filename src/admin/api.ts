@@ -5,7 +5,7 @@ import { generateApiKey } from '../auth.js';
 import { encrypt, randomSecret } from '../crypto.js';
 import { requireAdmin, audit, bigintReplacer, type AdminDeps } from './auth.js';
 import { hashPassword, temporaryPassword } from './security.js';
-import { completeManualLeg } from '../payouts/payouts.js';
+import { completeManualLeg, approveManualLeg, ManualLegError } from '../payouts/payouts.js';
 
 /*
  * API админки: /admin/v1/*
@@ -142,7 +142,7 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   // ---------- операторы ----------
 
   app.get('/admin/v1/operators', viewer, async () =>
-    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, platform_fee_bps, created_at FROM operators ORDER BY name`)).rows));
+    plain((await pool.query(`SELECT id, name, licenses, kyc_required_above, max_attempts, platform_fee_bps, payout_kyc_required, payout_max_amount, manual_approval_above, limit_increase_delay_hours, created_at FROM operators ORDER BY name`)).rows));
 
   const operatorBody = z.object({
     name: z.string().min(1).max(200),
@@ -150,10 +150,13 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
     kycRequiredAbove: money.nullable(),
     maxAttempts: z.number().int().min(1).max(10),
     platformFeeBps: z.number().int().min(0).max(10000),
+    payoutMaxAmount: money.nullable(),
+    manualApprovalAbove: z.union([z.literal(0), money]).nullable().transform((v) => (v === 0 ? 0n : v)),
+    limitIncreaseDelayHours: z.number().int().min(0).max(720),
   });
 
   app.post('/admin/v1/operators', admin, async (req, reply) => {
-    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true, platformFeeBps: true }), req.body, reply);
+    const b = parse(operatorBody.partial({ kycRequiredAbove: true, maxAttempts: true, platformFeeBps: true, payoutMaxAmount: true, manualApprovalAbove: true, limitIncreaseDelayHours: true }), req.body, reply);
     if (!b) return;
     const row = (await pool.query(
       `INSERT INTO operators (name, licenses, kyc_required_above, max_attempts, platform_fee_bps) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -173,8 +176,13 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
       const after = (await c.query(
         `UPDATE operators SET name = coalesce($2, name), licenses = coalesce($3, licenses),
            kyc_required_above = CASE WHEN $4::boolean THEN $5 ELSE kyc_required_above END,
-           max_attempts = coalesce($6, max_attempts), platform_fee_bps = coalesce($7, platform_fee_bps) WHERE id = $1 RETURNING *`,
-        [id.data, b.name ?? null, b.licenses ?? null, b.kycRequiredAbove !== undefined, b.kycRequiredAbove ?? null, b.maxAttempts ?? null, b.platformFeeBps ?? null])).rows[0];
+           max_attempts = coalesce($6, max_attempts), platform_fee_bps = coalesce($7, platform_fee_bps),
+           payout_max_amount = CASE WHEN $8::boolean THEN $9 ELSE payout_max_amount END,
+           manual_approval_above = CASE WHEN $10::boolean THEN $11 ELSE manual_approval_above END,
+           limit_increase_delay_hours = coalesce($12, limit_increase_delay_hours) WHERE id = $1 RETURNING *`,
+        [id.data, b.name ?? null, b.licenses ?? null, b.kycRequiredAbove !== undefined, b.kycRequiredAbove ?? null, b.maxAttempts ?? null, b.platformFeeBps ?? null,
+         b.payoutMaxAmount !== undefined, b.payoutMaxAmount ?? null, b.manualApprovalAbove !== undefined, b.manualApprovalAbove ?? null,
+         b.limitIncreaseDelayHours ?? null])).rows[0];
       await audit(c, { ...who(req), action: 'operator.update', entity: 'operator', entityId: id.data, before, after });
       return plain(after);
     });
@@ -396,25 +404,38 @@ export async function adminApiRoutes(app: FastifyInstance, d: AdminDeps) {
   app.get('/admin/v1/manual-payouts', viewer, async (req) => {
     const all = (req.query as { all?: string }).all === 'true';
     return plain((await pool.query(
-      `SELECT l.id, l.amount, l.status, l.note, l.created_at, l.completed_at, u.email AS completed_by,
-              t.id AS payout_id, t.currency, t.amount AS payout_amount, s.name AS site, p.external_id AS player, p.country
-       FROM payout_legs l JOIN transactions t ON t.id = l.payout_id JOIN sites s ON s.id = t.site_id
-       JOIN players p ON p.id = t.player_id LEFT JOIN admin_users u ON u.id = l.completed_by
+      `SELECT l.id, l.amount, l.status, l.note, l.reference, l.created_at, l.completed_at, u.email AS completed_by,
+              l.approved_at, l.approved_by AS approved_by_id, ua.email AS approved_by,
+              (o.manual_approval_above IS NOT NULL AND l.amount >= o.manual_approval_above) AS needs_approval,
+              t.id AS payout_id, t.withdrawal_id, t.currency, t.amount AS payout_amount, s.name AS site, p.external_id AS player, p.country
+       FROM payout_legs l JOIN transactions t ON t.id = l.payout_id JOIN sites s ON s.id = t.site_id JOIN operators o ON o.id = s.operator_id
+       JOIN players p ON p.id = t.player_id LEFT JOIN admin_users u ON u.id = l.completed_by LEFT JOIN admin_users ua ON ua.id = l.approved_by
        WHERE l.kind = 'manual' AND ($1 OR l.status = 'pending')
        ORDER BY l.created_at DESC LIMIT 200`, [all])).rows);
   });
 
-  app.post<{ Params: { id: string } }>('/admin/v1/manual-payouts/:id/complete', operator, async (req, reply) => {
-    const b = parse(z.object({ note: z.string().min(3).max(500) }), req.body, reply);
-    if (!b) return;
+  const manualError = (reply: FastifyReply, err: unknown) => {
+    if (err instanceof ManualLegError) return fail(reply, err.code === 'not_found' ? 404 : 409, err.code, err.message);
+    throw err;
+  };
+
+  app.post<{ Params: { id: string } }>('/admin/v1/manual-payouts/:id/approve', operator, async (req, reply) => {
     if (!uuid.safeParse(req.params.id).success) return fail(reply, 404, 'not_found', 'Ручная выплата не найдена');
-    const tx = await completeManualLeg(pool, req.params.id, req.admin!.userId, b.note);
-    if (!tx) return fail(reply, 404, 'not_found', 'Ожидающая ручная выплата не найдена');
-    await audit(pool, { ...who(req), action: 'payout.manual_complete', entity: 'payout', entityId: tx.id, after: { legId: req.params.id, note: b.note } });
-    return { ok: true, payoutStatus: tx.status };
+    try { await approveManualLeg(pool, req.params.id, who(req)); return { ok: true }; } catch (err) { return manualError(reply, err); }
   });
 
-  // ---------- расхождения ----------
+  app.post<{ Params: { id: string } }>('/admin/v1/manual-payouts/:id/complete', operator, async (req, reply) => {
+    const b = parse(z.object({
+      reference: z.string().trim().min(3, 'Укажи номер перевода или платёжного поручения').max(200),
+      note: z.string().trim().max(500).default(''),
+    }), req.body, reply);
+    if (!b) return;
+    if (!uuid.safeParse(req.params.id).success) return fail(reply, 404, 'not_found', 'Ручная выплата не найдена');
+    try {
+      const tx = await completeManualLeg(pool, req.params.id, who(req), { reference: b.reference, note: b.note });
+      return { ok: true, payoutStatus: tx.status };
+    } catch (err) { return manualError(reply, err); }
+  });
 
   app.get('/admin/v1/issues', viewer, async (req) => {
     const all = (req.query as { all?: string }).all === 'true';

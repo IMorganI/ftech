@@ -6,6 +6,7 @@ import type { PaymentDeps } from '../payments/flow.js';
 import { enqueueSiteEvent } from '../webhooks/outbox.js';
 import { accountCredentials } from '../providers/credentials.js';
 import { getTransactionById, IdempotencyConflictError, type TransactionView } from '../routing/router.js';
+import { audit } from '../admin/auth.js';
 
 /*
  * Выплаты игрокам по принципу closed loop.
@@ -29,10 +30,22 @@ export interface PayoutRequest {
   idempotencyKey: string;
   amount: bigint;
   currency: string;
+  /** ID вывода в системе казино: один вывод — одна выплата. */
+  withdrawalId: string;
   player: { externalId: string; kyc?: 'none' | 'pending' | 'verified' | 'rejected' };
 }
 
-export type PayoutDecline = 'kyc_required';
+export type PayoutDecline = 'kyc_required' | 'amount_over_limit';
+
+/** Этот вывод казино уже выплачивается (пришёл повторно с другим Idempotency-Key). */
+export class DuplicateWithdrawalError extends Error {
+  constructor(readonly payoutId: string) { super('Выплата по этому withdrawalId уже создана'); }
+}
+
+/** Ошибки действий с ручной выплатой в борде (с понятным кодом). */
+export class ManualLegError extends Error {
+  constructor(readonly code: 'not_found' | 'approval_required' | 'same_person' | 'already_approved' | 'approval_not_needed', message: string) { super(message); }
+}
 
 /** Игрок не известен сайту — выплачивать некому (он ни разу не делал депозит через нас). */
 export class UnknownPlayerError extends Error {
@@ -47,7 +60,7 @@ export interface PayoutLegView {
 }
 
 function hash(r: PayoutRequest) {
-  return createHash('sha256').update(JSON.stringify(['payout', r.amount.toString(), r.currency, r.player.externalId])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['payout', r.amount.toString(), r.currency, r.player.externalId, r.withdrawalId])).digest('hex');
 }
 
 export async function createPayout(pool: Pool, req: PayoutRequest): Promise<{ tx: TransactionView; replayed: boolean }> {
@@ -62,6 +75,8 @@ export async function createPayout(pool: Pool, req: PayoutRequest): Promise<{ tx
     const result = await withTransaction(pool, async (c) => {
       const existing = await lookup(c);
       if (existing) return { existing };
+      const dup = (await c.query(`SELECT id FROM transactions WHERE site_id = $1 AND withdrawal_id = $2`, [req.siteId, req.withdrawalId])).rows[0];
+      if (dup) throw new DuplicateWithdrawalError(dup.id);
       return { id: await insertPayout(c, req, h) };
     });
     if ('existing' in result) return replay(result.existing);
@@ -71,6 +86,10 @@ export async function createPayout(pool: Pool, req: PayoutRequest): Promise<{ tx
       const row = await lookup(pool);
       if (row) return replay(row);
     }
+    if (isUniqueViolation(err, 'transactions_withdrawal_idx')) {
+      const dup = (await pool.query(`SELECT id FROM transactions WHERE site_id = $1 AND withdrawal_id = $2`, [req.siteId, req.withdrawalId])).rows[0];
+      throw new DuplicateWithdrawalError(dup?.id);
+    }
     throw err;
   }
 }
@@ -79,13 +98,13 @@ async function insertPayout(c: Client, req: PayoutRequest, h: string): Promise<s
   // Игрок блокируется: выплаты одного игрока идут по очереди.
   const player = (await c.query(
     `SELECT id, kyc FROM players WHERE site_id = $1 AND external_id = $2 FOR UPDATE`, [req.siteId, req.player.externalId])).rows[0];
-  const op = (await c.query(`SELECT payout_kyc_required FROM operators WHERE id = $1`, [req.operatorId])).rows[0];
+  const op = (await c.query(`SELECT payout_kyc_required, payout_max_amount FROM operators WHERE id = $1`, [req.operatorId])).rows[0];
 
   const insert = async (playerId: string, status: 'pending' | 'declined', decline: PayoutDecline | null) =>
     (await c.query(
-      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, decline_code, idempotency_key, request_hash)
-       VALUES ($1, $2, 'payout', $3, $4, $5, $6, $7, $8) RETURNING id`,
-      [req.siteId, playerId, req.amount, req.currency, status, decline, req.idempotencyKey, h])).rows[0].id as string;
+      `INSERT INTO transactions (site_id, player_id, type, amount, currency, status, decline_code, idempotency_key, request_hash, withdrawal_id)
+       VALUES ($1, $2, 'payout', $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      [req.siteId, playerId, req.amount, req.currency, status, decline, req.idempotencyKey, h, req.withdrawalId])).rows[0].id as string;
 
   if (!player) throw new UnknownPlayerError();
   if (req.player.kyc && req.player.kyc !== player.kyc) {
@@ -94,6 +113,7 @@ async function insertPayout(c: Client, req: PayoutRequest, h: string): Promise<s
     player.kyc = updated.kyc;
   }
   if (op.payout_kyc_required && player.kyc !== 'verified') return insert(player.id, 'declined', 'kyc_required');
+  if (op.payout_max_amount !== null && req.amount > op.payout_max_amount) return insert(player.id, 'declined', 'amount_over_limit');
 
   const payoutId = await insert(player.id, 'pending', null);
 
@@ -188,18 +208,54 @@ async function ledgerOut(c: Client, payoutId: string, account: string, amount: b
 }
 
 /** Оператор отметил ручную выплату выполненной. */
-export async function completeManualLeg(pool: Pool, legId: string, adminUserId: string, note: string): Promise<TransactionView | null> {
+interface ActionCtx { userId: string; ip?: string }
+
+/** Ручная выплата и нужно ли для неё одобрение второго сотрудника. Под блокировкой строки. */
+async function lockManualLeg(c: Client, legId: string) {
+  const leg = (await c.query(
+    `SELECT l.id, l.payout_id, l.amount, l.status, l.approved_by, o.id AS operator_id, o.manual_approval_above
+     FROM payout_legs l JOIN transactions t ON t.id = l.payout_id JOIN sites s ON s.id = t.site_id JOIN operators o ON o.id = s.operator_id
+     WHERE l.id = $1 AND l.kind = 'manual' FOR UPDATE OF l`, [legId])).rows[0];
+  if (!leg || leg.status !== 'pending') throw new ManualLegError('not_found', 'Ожидающая ручная выплата не найдена');
+  const needsApproval = leg.manual_approval_above !== null && BigInt(leg.amount) >= BigInt(leg.manual_approval_above);
+  return { ...leg, needsApproval };
+}
+
+/** Одобрить ручную выплату (первый сотрудник). Выполненной её отметит другой. */
+export async function approveManualLeg(pool: Pool, legId: string, ctx: ActionCtx): Promise<void> {
+  await withTransaction(pool, async (c) => {
+    const leg = await lockManualLeg(c, legId);
+    if (!leg.needsApproval) throw new ManualLegError('approval_not_needed', 'Эта сумма не требует одобрения — её можно сразу отметить выполненной');
+    if (leg.approved_by) throw new ManualLegError('already_approved', 'Уже одобрено');
+    await c.query(`UPDATE payout_legs SET approved_by = $2, approved_at = now() WHERE id = $1`, [legId, ctx.userId]);
+    // Журнал — в той же транзакции: действие и запись о нём либо есть обе, либо нет ни одной.
+    await audit(c, { userId: ctx.userId, action: 'payout.manual_approve', entity: 'payout', entityId: leg.payout_id, ip: ctx.ip,
+      after: { legId, amount: leg.amount } });
+  });
+}
+
+/**
+ * Отметить ручную выплату выполненной: номер подтверждающей операции обязателен.
+ * Если сумма требует одобрения — нужно одобрение, и отмечает не тот, кто одобрил.
+ */
+export async function completeManualLeg(pool: Pool, legId: string, ctx: ActionCtx, input: { note: string; reference: string }): Promise<TransactionView> {
   const payoutId = await withTransaction(pool, async (c) => {
-    const leg = (await c.query(
-      `UPDATE payout_legs l SET status = 'success', completed_at = now(), completed_by = $2, note = coalesce(note || ' · ', '') || $3
-       WHERE l.id = $1 AND l.kind = 'manual' AND l.status = 'pending' RETURNING l.payout_id, l.amount`,
-      [legId, adminUserId, note])).rows[0];
-    if (!leg) return null;
-    const op = (await c.query(`SELECT s.operator_id FROM transactions t JOIN sites s ON s.id = t.site_id WHERE t.id = $1`, [leg.payout_id])).rows[0];
-    await ledgerOut(c, leg.payout_id, `manual:${op.operator_id}`, leg.amount);
+    const leg = await lockManualLeg(c, legId);
+    if (leg.needsApproval && !leg.approved_by) {
+      throw new ManualLegError('approval_required', 'Сумма требует одобрения вторым сотрудником — сначала «Одобрить»');
+    }
+    if (leg.needsApproval && leg.approved_by === ctx.userId) {
+      throw new ManualLegError('same_person', 'Одобрил ты — отметить выполненной должен другой сотрудник');
+    }
+    await c.query(
+      `UPDATE payout_legs SET status = 'success', completed_at = now(), completed_by = $2, reference = $3,
+         note = coalesce(note || ' · ', '') || $4 WHERE id = $1`, [legId, ctx.userId, input.reference, input.note]);
+    await ledgerOut(c, leg.payout_id, `manual:${leg.operator_id}`, leg.amount);
+    await audit(c, { userId: ctx.userId, action: 'payout.manual_complete', entity: 'payout', entityId: leg.payout_id, ip: ctx.ip,
+      after: { legId, amount: leg.amount, reference: input.reference, note: input.note } });
     return leg.payout_id as string;
   });
-  return payoutId ? finalize(pool, payoutId) : null;
+  return finalize(pool, payoutId);
 }
 
 /** Итог выплаты: все части выполнены — успех; есть ручные в ожидании — сайт узнаёт, что нужна ручная выплата. */
