@@ -33,13 +33,14 @@ export function parseCsv(text: string): { headers: string[]; rows: string[][] } 
   return { headers: headers.map((h) => h.trim()), rows };
 }
 
-export const FIELDS = ['ref', 'operationId', 'type', 'status', 'amount', 'currency', 'fee', 'date', 'caseRef', 'reason'] as const;
+export const FIELDS = ['ref', 'operationId', 'type', 'status', 'amount', 'currency', 'fee', 'date', 'caseRef', 'reason', 'deadline'] as const;
 export type Field = (typeof FIELDS)[number];
 export type Mapping = Partial<Record<Field, string | null>>; // поле → название колонки
 
 export const FIELD_TITLES: Record<Field, string> = {
   ref: 'ID платежа у провайдера (заказа)', operationId: 'ID операции', type: 'Тип операции', status: 'Статус',
   amount: 'Сумма', currency: 'Валюта', fee: 'Комиссия провайдера', date: 'Дата', caseRef: 'ID спора', reason: 'Код причины',
+  deadline: 'Срок ответа по спору',
 };
 
 const ALIASES: Record<Field, string[]> = {
@@ -53,6 +54,7 @@ const ALIASES: Record<Field, string[]> = {
   date: ['date', 'created', 'created at', 'createdat', 'transaction date', 'insdate', 'datetime', 'time', 'дата'],
   caseRef: ['case id', 'caseid', 'dispute id', 'disputeid', 'chargeback id', 'case', 'id спора'],
   reason: ['reason code', 'reasoncode', 'reason', 'причина', 'код причины'],
+  deadline: ['respond by', 'respondby', 'due date', 'duedate', 'deadline', 'response due', 'reply by', 'срок ответа', 'ответить до'],
 };
 
 const norm = (s: string) => s.toLowerCase().replace(/[_\-.]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -82,6 +84,7 @@ export interface ReportRow {
   date: Date | null;
   caseRef: string | null;
   reason: string | null;
+  deadline: string | null; // YYYY-MM-DD
 }
 
 /** Сумма из отчёта в минорных единицах. «1 234,56», «1,234.56», «-15.00», «1050» (если суммы в центах). */
@@ -127,15 +130,20 @@ export function normalizeRows(headers: string[], rows: string[][], mapping: Mapp
     const negative = !!rawAmount && /^\s*-/.test(rawAmount);
     let kind = kindOf(get(r, 'type') ?? '');
     if (kind === 'payment' && negative && idx.type < 0) kind = 'refund'; // без колонки типа: минус — возврат
-    const d = get(r, 'date');
-    const date = d ? new Date(/^\d{2}[./]\d{2}[./]\d{4}/.test(d) ? d.replace(/^(\d{2})[./](\d{2})[./](\d{4})/, '$3-$2-$1') : d) : null;
+    const toDate = (v: string | undefined) => {
+      if (!v) return null;
+      const x = new Date(/^\d{2}[./]\d{2}[./]\d{4}/.test(v) ? v.replace(/^(\d{2})[./](\d{2})[./](\d{4})/, '$3-$2-$1') : v);
+      return Number.isNaN(x.getTime()) ? null : x;
+    };
+    const date = toDate(get(r, 'date'));
+    const deadline = toDate(get(r, 'deadline'));
     return {
       lineNo: i + 2, kind, status: statusOf(get(r, 'status') ?? ''),
       ref: get(r, 'ref') || null, operationId: get(r, 'operationId') || null,
       amount: parseAmount(rawAmount, unit),
       currency: currencyFromViva((get(r, 'currency') ?? '').toUpperCase()),
       fee: parseAmount(get(r, 'fee'), unit) ?? 0n,
-      date: date && !Number.isNaN(date.getTime()) ? date : null,
+      date, deadline: deadline ? deadline.toISOString().slice(0, 10) : null,
       caseRef: get(r, 'caseRef') || null, reason: get(r, 'reason') || null,
     };
   });

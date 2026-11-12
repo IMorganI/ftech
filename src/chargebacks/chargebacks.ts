@@ -71,7 +71,7 @@ export async function openChargeback(pool: Pool, input: OpenChargeback, ctx: Ctx
        input.respondBy ?? null, input.source, ctx.userId ?? null])).rows[0].id as string;
     await c.query(`UPDATE transactions SET charged_back_amount = charged_back_amount + $2, updated_at = now() WHERE id = $1`, [tx.id, amount]);
     await c.query(`INSERT INTO chargeback_events (chargeback_id, status, note, admin_user_id) VALUES ($1, 'open', $2, $3)`,
-      [id, input.note ?? (input.source === 'report' ? 'найден в отчёте провайдера' : null), ctx.userId ?? null]);
+      [id, input.note ?? (input.source === 'report' ? 'найден в выписке провайдера' : null), ctx.userId ?? null]);
     const acc = `merchant:${tx.merchant_account_id}`;
     await ledger(c, tx.id, cur, [[acc, -amount], [`chargeback_hold:${tx.operator_id}`, amount],
       ...(fee > 0n ? [[acc, -fee], [`provider_fees:${tx.merchant_account_id}`, fee]] as [string, bigint][] : [])]);

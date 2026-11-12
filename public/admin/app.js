@@ -191,6 +191,8 @@ const MENU = [
   ['Контроль', [
     ['stuck', 'Зависшие деньги', 'viewer', 'Где и сколько денег ждёт, как давно и что делать'],
     ['issues', 'Проблемы', 'viewer', 'Расхождения с провайдерами, которые разбирает человек'],
+    ['chargebacks', 'Чарджбэки', 'viewer', 'Споры игроков через банк: сроки ответа, доказательства, итог'],
+    ['reconciliation', 'Сверка с провайдером', 'viewer', 'Загрузи выписку из кабинета провайдера — увидишь, где деньги расходятся'],
     ['audit', 'Журнал действий', 'admin', 'Кто, что и когда менял в борде'],
   ]],
   ['Настройки', [
@@ -220,7 +222,9 @@ async function refreshBadges() {
     const [o, st] = await Promise.all([api('GET', '/admin/v1/overview'), api('GET', '/admin/v1/stuck').catch(() => null)]);
     // Зависшие: только то, что требует действия или внимания (без «ждут оплаты игроком»).
     const stuck = st ? st.categories.filter((c) => c.severity === 'bad').reduce((a, c) => a + c.count, 0) : 0;
-    state.badges = { manual: o.manual_payouts ?? 0, issues: o.open_issues ?? 0, stuck };
+    const catCount = (k) => st?.categories.find((c) => c.key === k)?.count ?? 0;
+    state.badges = { manual: o.manual_payouts ?? 0, issues: o.open_issues ?? 0, stuck,
+      chargebacks: catCount('chargeback_deadline') + catCount('chargebacks_open'), reconciliation: catCount('report_discrepancies') };
     for (const [id, n] of Object.entries(state.badges)) {
       const b = document.querySelector(`[data-badge="${id}"]`);
       if (b) { b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; }
@@ -239,7 +243,7 @@ function renderShell() {
         visible.map(([id, label]) => h('button', {
           class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => go(id),
         }, h('span', null, label),
-          ['manual', 'issues', 'stuck'].includes(id) ? h('span', { class: `badge ${id === 'manual' ? 'warn' : 'bad'}`, 'data-badge': id, hidden: !badges[id] }, String(badges[id] ?? 0)) : null)));
+          ['manual', 'issues', 'stuck', 'chargebacks', 'reconciliation'].includes(id) ? h('span', { class: `badge ${id === 'manual' ? 'warn' : 'bad'}`, 'data-badge': id, hidden: !badges[id] }, String(badges[id] ?? 0)) : null)));
     }));
   const [, title, , subtitle] = TABS.find(([id]) => id === state.tab) || TABS[0];
   const group = MENU.find(([, items]) => items.some(([id]) => id === state.tab))?.[0] ?? '';
@@ -270,7 +274,7 @@ function renderShell() {
   };
   run();
   // Живые разделы обновляются сами, пока пользователь ничего не редактирует.
-  if (['overview', 'payments', 'manual', 'accounts', 'issues', 'stuck'].includes(state.tab)) {
+  if (['overview', 'payments', 'manual', 'accounts', 'issues', 'stuck', 'chargebacks'].includes(state.tab)) {
     state.timer = setInterval(() => { if (!main.contains(document.activeElement) || document.activeElement === document.body) run(); }, 5000);
   }
 }
@@ -671,6 +675,7 @@ async function showTx(box, id) {
       t.withdrawalId ? [h('span', null, 'Вывод казино'), h('span', null, t.withdrawalId)] : null,
       t.platformFee !== null && t.platformFee !== undefined ? [h('span', null, 'Заработок платформы'), h('span', null, money(t.platformFee, t.currency))] : null,
       t.type === 'deposit' && BigInt(t.refunded || 0) > 0n ? [h('span', null, 'Возвращено игроку'), h('span', null, money(t.refunded, t.currency))] : null),
+    t.type === 'deposit' && t.status === 'success' && can('operator') ? chargebackForm(t) : null,
     h('h2', null, 'История'),
     h('ol', { class: 'timeline' }, t.events.map((e) => {
       const d = day(e.at); const showDay = d !== lastDay; lastDay = d;
@@ -713,13 +718,186 @@ async function viewStuck(main) {
       h('p', { class: 'note' }, c.hint),
       h('div', { class: 'tbl' }, h('table', null,
         h('thead', null, h('tr', null, ['Сколько ждёт', 'Сумма', 'Подробности', ''].map((x) => h('th', null, x)))),
-        h('tbody', null, c.items.map((i) => h('tr', { class: 'click', tabindex: 0, onclick: () => openTx(i.txId), onkeydown: (e) => { if (e.key === 'Enter') openTx(i.txId); } },
+        h('tbody', null, c.items.map((i) => h('tr', { class: 'click', tabindex: 0, onclick: () => (i.txId ? openTx(i.txId) : go(c.tab)), onkeydown: (e) => { if (e.key === 'Enter') e.currentTarget.click(); } },
           h('td', { class: 'n' }, ageText(i.at)), h('td', { class: 'n' }, money(i.amount, i.currency)),
-          h('td', { class: 'dim' }, i.label), h('td', null, h('span', { class: 'link-like' }, 'История →'))))))),
+          h('td', { class: 'dim' }, i.label), h('td', null, h('span', { class: 'link-like' }, i.txId ? 'История →' : 'Раздел →'))))))),
       c.count > c.items.length ? h('p', { class: 'note' }, `Показаны первые ${c.items.length} из ${c.count}.`) : null))
       : h('section', { class: 'panel hint' }, h('h3', null, 'Всё чисто'), h('p', null, 'Нет денег, которые зависли или ждут человека.')),
     quiet.length ? h('section', { class: 'panel' }, h('h2', null, 'Без замечаний'),
       h('ul', { class: 'plain note' }, quiet.map((c) => h('li', null, `✓ ${c.title}`)))) : null);
+}
+
+function chargebackForm(t) {
+  const free = BigInt(t.amount) - BigInt(t.refunded || 0) - BigInt(t.chargedBack || 0);
+  if (free <= 0n) return null;
+  const inWeek = new Date(Date.now() + 7 * 86400e3).toISOString().slice(0, 10);
+  return h('details', { class: 'cb-form' }, h('summary', null, 'Игрок оспорил оплату? Зарегистрировать чарджбэк'),
+    h('p', { class: 'note' }, 'Обычно чарджбэки приходят в выписке провайдера и заводятся сами при сверке. Вручную — если провайдер сообщил письмом или в кабинете.'),
+    actionForm({ class: 'form' }, [
+      field('Сумма спора', h('input', { name: 'amount', required: true, inputmode: 'decimal', value: (Number(free) / 100).toFixed(2) })),
+      field('Комиссия за чарджбэк', h('input', { name: 'fee', inputmode: 'decimal', placeholder: '0' })),
+      field('ID спора у провайдера', h('input', { name: 'caseRef', placeholder: 'например CB-12345' })),
+      field('Код причины', h('input', { name: 'reasonCode', placeholder: '10.4, 4837…' })),
+      field('Ответить до', h('input', { name: 'respondBy', type: 'date', value: inWeek })),
+      field('Комментарий', h('input', { name: 'note', placeholder: 'откуда узнали' }), 'wide'),
+      h('div', null, h('button', { class: 'primary', type: 'submit' }, 'Зарегистрировать')),
+    ], async (v) => {
+      const amount = toCents(v.amount);
+      if (!amount) throw new Error('Сумма — число больше нуля');
+      await api('POST', '/admin/v1/chargebacks', { transactionId: t.id, amount, ...(v.fee.trim() ? { fee: toCents(v.fee) || 0 } : {}),
+        ...(v.caseRef.trim() ? { caseRef: v.caseRef.trim() } : {}), ...(v.reasonCode.trim() ? { reasonCode: v.reasonCode.trim() } : {}),
+        ...(v.respondBy ? { respondBy: v.respondBy } : {}), ...(v.note.trim() ? { note: v.note.trim() } : {}) });
+      renderShell();
+    }));
+}
+
+// ---------- чарджбэки ----------
+
+const CB_STATUS = { open: ['ждёт ответа', 'warn'], evidence_submitted: ['доказательства отправлены', 'n'], won: ['выигран', 'ok'], lost: ['проигран', 'bad'], accepted: ['принят', 'm'] };
+
+async function viewChargebacks(main) {
+  const all = !!state.cache.cbAll;
+  const rows = await api('GET', `/admin/v1/chargebacks${all ? '?all=true' : ''}`);
+  const deadline = (r) => {
+    if (!r.respond_by || !['open', 'evidence_submitted'].includes(r.status)) return r.respond_by ? h('span', { class: 'dim' }, new Date(r.respond_by).toLocaleDateString('ru-RU')) : '—';
+    const d = r.days_left;
+    const cls = d < 0 ? 'bad' : d <= 3 ? 'bad' : d <= 7 ? 'warn' : 'ok';
+    return h('div', null, h('span', { class: `pill ${cls}` }, d < 0 ? `просрочен на ${-d} дн` : d === 0 ? 'сегодня' : `через ${d} дн`),
+      h('div', { class: 'note' }, new Date(r.respond_by).toLocaleDateString('ru-RU')));
+  };
+  const act = (r, status, label, cls, needNote) => actionForm({ class: 'row start' }, [
+    needNote ? h('input', { name: 'note', placeholder: 'что отправили', required: true, minlength: 3, style: 'width:170px' }) : null,
+    h('button', { class: `sm ${cls || ''}`, type: 'submit' }, label),
+  ], async (v) => { await api('POST', `/admin/v1/chargebacks/${r.id}/status`, { status, ...(v.note ? { note: v.note } : {}) }); renderShell(); });
+  const actions = (r) => {
+    if (!can('operator')) return null;
+    if (r.status === 'open') return h('div', { class: 'stack' }, act(r, 'evidence_submitted', 'Доказательства отправлены', 'primary', true),
+      h('div', { class: 'row start' }, act(r, 'won', 'Выиграли'), act(r, 'lost', 'Проиграли', 'danger'), act(r, 'accepted', 'Не спорим')));
+    if (r.status === 'evidence_submitted') return h('div', { class: 'row start' }, act(r, 'won', 'Выиграли', 'primary'), act(r, 'lost', 'Проиграли', 'danger'));
+    return null;
+  };
+  put(main,
+    h('section', { class: 'panel hint' },
+      h('h3', null, 'Как отвечать на чарджбэк'),
+      h('p', null, 'Эквайер уже списал сумму. Чтобы вернуть её, до срока отправь провайдеру доказательства: подтверждение KYC, IP и устройство входов игрока, историю ставок после депозита, переписку с поддержкой, принятые условия. Без ответа спор проигрывается автоматически.')),
+    h('section', { class: 'panel' },
+      h('div', { class: 'row' }, h('h2', null, all ? 'Все чарджбэки' : 'Открытые чарджбэки'),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: all, onchange: (e) => { state.cache.cbAll = e.target.checked; renderShell(); } }), 'Показать закрытые')),
+      rows.length ? h('div', { class: 'tbl' }, h('table', null,
+        h('thead', null, h('tr', null, ['Открыт', 'Игрок', 'Сумма', 'Причина', 'Ответить', 'Статус', ''].map((x) => h('th', null, x)))),
+        h('tbody', null, rows.map((r) => h('tr', null,
+          h('td', { class: 'n' }, when(r.opened_at), h('div', { class: 'note' }, r.source === 'report' ? 'из выписки' : 'вручную')),
+          h('td', null, h('button', { class: 'link', onclick: () => openTx(r.transaction_id) }, r.player), h('div', { class: 'note' }, `${r.site} · ${r.account}`)),
+          h('td', { class: 'n' }, h('b', null, money(r.amount, r.currency)), BigInt(r.fee) ? h('div', { class: 'note' }, `+ комиссия ${money(r.fee, r.currency)}`) : null),
+          h('td', null, r.reason_code || '—', r.case_ref ? h('div', { class: 'note' }, r.case_ref) : null),
+          h('td', null, deadline(r)),
+          h('td', null, h('span', { class: `pill ${CB_STATUS[r.status][1]}` }, CB_STATUS[r.status][0]),
+            (r.history || []).length > 1 ? h('details', { class: 'note' }, h('summary', null, 'история'),
+              h('ul', { class: 'plain' }, r.history.map((e) => h('li', null, `${when(e.at)} · ${CB_STATUS[e.status][0]}${e.by ? ` · ${e.by}` : ''}${e.note ? ` · ${e.note}` : ''}`)))) : null),
+          h('td', null, actions(r))))))) : h('p', { class: 'note' }, all ? 'Чарджбэков не было.' : 'Открытых чарджбэков нет.')));
+}
+
+// ---------- сверка с провайдером ----------
+
+async function viewReconciliation(main) {
+  const [accounts, imports] = await Promise.all([api('GET', '/admin/v1/accounts'), api('GET', '/admin/v1/reports')]);
+  clearInterval(state.timer);
+  const rc = state.cache.rc ||= { accountId: accounts[0]?.id || '', file: null, preview: null, selected: imports[0]?.id || null };
+  const upload = h('div', { class: 'stack' });
+  const detail = h('div');
+
+  const renderPreview = () => {
+    const p = rc.preview;
+    if (!p) return put(upload);
+    const sel = (f) => h('select', { name: f.key, onchange: (e) => { p.mapping[f.key] = e.target.value || null; } },
+      h('option', { value: '' }, '— нет в файле —'),
+      p.headers.map((hd) => { const o = h('option', { value: hd }, hd); if (p.mapping[f.key] === hd) o.selected = true; return o; }));
+    const kindRu = { payment: 'оплата', refund: 'возврат', chargeback: 'чарджбэк', fee: 'комиссия', other: 'другое' };
+    const out = h('div');
+    put(upload,
+      h('div', { class: 'note' }, `${rc.file.name}: ${p.rowCount} строк. ${p.remembered ? 'Колонки подставлены из прошлой загрузки для этого провайдера.' : 'Колонки распознаны по названиям — проверь.'}`),
+      h('div', { class: 'form' }, p.fields.map((f) => field(f.title + (f.required ? ' *' : ''), sel(f))),
+        field('Суммы в файле', h('select', { onchange: (e) => { p.amountUnit = e.target.value; } },
+          [['major', 'в единицах валюты (12.50)'], ['minor', 'в центах (1250)']].map(([v, t]) => { const o = h('option', { value: v }, t); if (p.amountUnit === v) o.selected = true; return o; })))),
+      h('details', null, h('summary', null, 'Как система поняла первые строки'),
+        h('div', { class: 'tbl' }, h('table', null, h('thead', null, h('tr', null, ['Строка', 'Тип', 'Статус', 'ID у провайдера', 'Сумма', 'Комиссия'].map((x) => h('th', null, x)))),
+          h('tbody', null, p.sample.map((r) => h('tr', null, h('td', { class: 'n' }, r.lineNo), h('td', null, kindRu[r.kind]), h('td', null, r.status),
+            h('td', { class: 'n' }, r.ref || '—'), h('td', { class: 'n' }, r.amount ? money(r.amount, r.currency) : '?'), h('td', { class: 'n' }, money(r.fee, r.currency)))))))),
+      h('div', { class: 'row start' }, h('button', { class: 'primary', onclick: async (e) => {
+        e.target.disabled = true; put(out);
+        try {
+          const r = await api('POST', '/admin/v1/reports/import', { accountId: rc.accountId, filename: rc.file.name, csv: rc.file.text, mapping: p.mapping, amountUnit: p.amountUnit });
+          rc.preview = null; rc.file = null; rc.selected = r.id; renderShell();
+        } catch (err) { e.target.disabled = false; if (!handleAuthError(err)) put(out, errorBox(err)); }
+      } }, 'Сверить'), h('button', { onclick: () => { rc.preview = null; rc.file = null; renderPreview(); } }, 'Отмена')), out);
+  };
+
+  const fileInput = h('input', { type: 'file', accept: '.csv,text/csv,text/plain', onchange: async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 5 * 1024 * 1024) return put(upload, h('div', { class: 'msg err' }, 'Файл больше 5 МБ — выгрузи период короче'));
+    put(upload, h('p', { class: 'note' }, 'Читаю файл…'));
+    try {
+      rc.file = { name: f.name, text: await f.text() };
+      rc.preview = await api('POST', '/admin/v1/reports/preview', { accountId: rc.accountId, filename: f.name, csv: rc.file.text });
+      renderPreview();
+    } catch (err) { if (!handleAuthError(err)) put(upload, errorBox(err)); }
+  } });
+
+  const SEVR = { bad: ['расхождение', 'bad'], warn: ['проверить', 'warn'], info: ['для сведения', 'm'], ok: ['совпадает', 'ok'] };
+  const KIND = { payment: 'оплата', refund: 'возврат', chargeback: 'чарджбэк', fee: 'комиссия', other: 'другое' };
+  const showImport = async (id) => {
+    if (!id) return put(detail, h('p', { class: 'note' }, 'Загрузок пока не было.'));
+    const r = await api('GET', `/admin/v1/reports/${id}`);
+    const s = r.summary; const cur = s.currency || '';
+    const onlyProblems = state.cache.rcProblems !== false;
+    const lines = onlyProblems ? r.lines.filter((l) => l.severity === 'bad' || l.severity === 'warn') : r.lines;
+    const feeDiff = BigInt(s.fees.diff);
+    put(detail,
+      h('div', { class: 'row' }, h('h3', null, `${r.filename} · ${r.account}`),
+        h('span', { class: 'note' }, r.period_from ? `${new Date(r.period_from).toLocaleDateString('ru-RU')} — ${new Date(r.period_to).toLocaleDateString('ru-RU')}` : '')),
+      h('div', { class: 'kpis' },
+        h('div', { class: `kpi ${s.bad ? 'alarm' : ''}` }, h('span', { class: 'kpi-label' }, 'Расхождения'), h('b', { class: 'kpi-value' }, String(s.bad)), h('span', { class: 'kpi-sub' }, 'деньги видим по-разному')),
+        h('div', { class: 'kpi' }, h('span', { class: 'kpi-label' }, 'Проверить'), h('b', { class: 'kpi-value' }, String(s.warn)), h('span', { class: 'kpi-sub' }, 'новые чарджбэки, нет в выписке')),
+        h('div', { class: 'kpi money' }, h('span', { class: 'kpi-label' }, 'Совпало'), h('b', { class: 'kpi-value' }, money(s.matchedPayments, cur)), h('span', { class: 'kpi-sub' }, `${s.ok} строк · возвраты ${money(s.matchedRefunds, cur)}`)),
+        h('div', { class: `kpi ${feeDiff !== 0n ? 'alarm' : ''}` }, h('span', { class: 'kpi-label' }, 'Комиссия за совпавшие оплаты'), h('b', { class: 'kpi-value' }, money(s.fees.report, cur)),
+          h('span', { class: 'kpi-sub' }, (feeDiff === 0n ? 'совпадает со ставкой аккаунта' : `по ставке аккаунта ${money(s.fees.ours, cur)} · разница ${money(s.fees.diff, cur)} — проверь ставку`)
+            + (BigInt(s.fees.other || 0) ? ` · прочие комиссии (чарджбэки и др.) ${money(s.fees.other, cur)}` : '')))),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: onlyProblems, onchange: (e) => { state.cache.rcProblems = e.target.checked; showImport(id); } }), 'Только то, что требует внимания'),
+      lines.length ? h('div', { class: 'tbl' }, h('table', null,
+        h('thead', null, h('tr', null, ['Строка', 'Что', 'ID у провайдера', 'Сумма', 'Итог', ''].map((x) => h('th', null, x)))),
+        h('tbody', null, lines.map((l) => h('tr', null,
+          h('td', { class: 'n' }, l.line_no ?? 'у нас'), h('td', null, KIND[l.kind] || l.kind, l.case_ref ? h('div', { class: 'note' }, l.case_ref) : null),
+          h('td', { class: 'n' }, l.transaction_id ? h('button', { class: 'link', onclick: () => openTx(l.transaction_id) }, l.provider_ref || '—') : (l.provider_ref || '—')),
+          h('td', { class: 'n' }, l.amount !== null ? money(l.amount, l.currency || cur) : '—'),
+          h('td', null, h('span', { class: `pill ${SEVR[l.severity][1]}` }, SEVR[l.severity][0]), h('div', { class: 'note' }, l.details)),
+          h('td', null, l.resolved ? h('div', { class: 'note' }, `✓ ${l.resolved_by_email}: ${l.resolution_note}`)
+            : (l.severity === 'bad' || l.severity === 'warn') && can('operator') ? actionForm({ class: 'row start' }, [
+              h('input', { name: 'note', required: true, minlength: 3, placeholder: 'что сделали', style: 'width:150px' }),
+              h('button', { class: 'sm', type: 'submit' }, 'Разобрано')],
+              async (v) => { await api('POST', `/admin/v1/reports/lines/${l.id}/resolve`, v); showImport(id); }) : null)))))) : h('p', { class: 'note' }, 'Всё сошлось — расхождений нет.'));
+  };
+
+  put(main,
+    can('operator') ? h('section', { class: 'panel' },
+      h('h2', null, 'Загрузить выписку'),
+      h('p', { class: 'note' }, 'Выгрузи в кабинете провайдера операции за период (CSV) и загрузи сюда. Система сопоставит каждую оплату, возврат и чарджбэк с нашими данными и покажет, где деньги расходятся. Чарджбэки из выписки заводятся сами.'),
+      h('div', { class: 'form' },
+        field('Платёжный аккаунт', h('select', { onchange: (e) => { rc.accountId = e.target.value; rc.preview = null; renderPreview(); } },
+          accounts.map((a) => { const o = h('option', { value: a.id }, `${a.name} (${a.provider_code})`); if (a.id === rc.accountId) o.selected = true; return o; })), 'wide'),
+        field('Файл выписки (CSV, до 5 МБ)', fileInput, 'wide')),
+      upload) : null,
+    h('div', { class: 'grid2 rc' },
+      h('section', { class: 'panel rc-list' }, h('h2', null, 'Загрузки'),
+        imports.length ? h('div', { class: 'tbl' }, h('table', null,
+          h('thead', null, h('tr', null, ['Когда', 'Файл', 'Итог'].map((x) => h('th', null, x)))),
+          h('tbody', null, imports.map((i) => h('tr', { class: `click ${rc.selected === i.id ? 'sel' : ''}`, tabindex: 0, onclick: (e) => {
+            rc.selected = i.id; e.currentTarget.parentNode.querySelectorAll('tr').forEach((x) => x.classList.remove('sel')); e.currentTarget.classList.add('sel'); showImport(i.id); } },
+            h('td', { class: 'n' }, when(i.uploaded_at), h('div', { class: 'note' }, i.uploaded_by || '')),
+            h('td', null, i.filename, h('div', { class: 'note' }, `${i.account} · ${i.rows_total} строк`)),
+            h('td', null, i.open ? h('span', { class: 'pill bad' }, `${i.open} открыто`) : h('span', { class: 'pill ok' }, 'всё сошлось'))))))) : h('p', { class: 'note' }, 'Ещё не загружали.')),
+      h('section', { class: 'panel' }, detail)));
+  if (state.cache.rc.preview) renderPreview();
+  await showImport(rc.selected);
 }
 
 // ---------- песочница ----------
@@ -1230,7 +1408,7 @@ async function viewAudit(main) {
         h('td', null, diff(r.before, r.after)), h('td', { class: 'n dim' }, r.ip || ''))))))));
 }
 
-const VIEWS = { overview: viewOverview, analytics: viewAnalytics, stuck: viewStuck, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
+const VIEWS = { overview: viewOverview, analytics: viewAnalytics, stuck: viewStuck, chargebacks: viewChargebacks, reconciliation: viewReconciliation, manual: viewManual, accounts: viewAccounts, payments: viewPayments, sandbox: viewSandbox, issues: viewIssues, connect: viewConnect, users: viewUsers, audit: viewAudit };
 
 window.addEventListener('hashchange', () => {
   const id = location.hash.slice(1);

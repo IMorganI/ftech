@@ -108,7 +108,7 @@ describe.skipIf(!url)('Сверка и чарджбэки', () => {
     expect(pv.sample[0]).toMatchObject({ kind: 'payment', status: 'success', amount: '10000', currency: 'EUR', fee: '190' });
     expect(res.statusCode).toBe(201);
     expect(res.json().summary).toMatchObject({ rows: 3, ok: 2, info: 1, warn: 0, bad: 0, matchedPayments: '12500',
-      fees: { report: '237', ours: '237', diff: '0' } });
+      fees: { report: '237', ours: '237', diff: '0', other: '0' } });
     expect((await call('POST', '/admin/v1/reports/preview', { accountId: acc, filename: 'x.csv', csv: sim.reportCsv() })).json().remembered).toBe(true);
   });
 
@@ -146,11 +146,12 @@ describe.skipIf(!url)('Сверка и чарджбэки', () => {
     expect(r2.summary.warn).toBe(0);
     const cbs = (await call('GET', '/admin/v1/chargebacks')).json();
     expect(cbs).toHaveLength(1);
-    expect(cbs[0]).toMatchObject({ amount: '5000', fee: '0', status: 'open', reason_code: '10.4', source: 'report', transaction_id: a.id });
+    expect(cbs[0]).toMatchObject({ amount: '5000', fee: '1500', status: 'open', reason_code: '10.4', source: 'report', transaction_id: a.id });
     expect(cbs[0].case_ref).toMatch(/^CB-/);
+    expect(cbs[0].days_left).toBe(7); // срока в выписке нет — 7 дней, чтобы спор не потерялся
     expect(await ledgerBalanced()).toBe(true);
     const merchant = async () => (await pool.query(`SELECT coalesce(sum(amount),0)::bigint s FROM ledger_entries WHERE account = 'merchant:' || $1`, [acc])).rows[0].s;
-    expect(await merchant()).toBe(0n); // +5000 оплата, −5000 списано эквайером
+    expect(await merchant()).toBe(-1500n); // +5000 оплата, −5000 списано эквайером, −15.00 комиссия за чарджбэк
 
     // Выплата игроку: оспоренный депозит на карту не возвращается — всё уходит в ручную.
     const po = (await app.inject({ method: 'POST', url: '/v1/payouts', headers: { authorization: `Bearer ${siteKey}`, 'idempotency-key': 'po-cb-00001' },
@@ -164,7 +165,7 @@ describe.skipIf(!url)('Сверка и чарджбэки', () => {
     expect((await call('POST', `/admin/v1/chargebacks/${cbs[0].id}/status`, { status: 'evidence_submitted', note: 'логи входа и KYC' })).statusCode).toBe(200);
     expect((await call('POST', `/admin/v1/chargebacks/${cbs[0].id}/status`, { status: 'accepted' })).statusCode).toBe(409); // после доказательств — только won/lost
     expect((await call('POST', `/admin/v1/chargebacks/${cbs[0].id}/status`, { status: 'won' })).statusCode).toBe(200);
-    expect(await merchant()).toBe(5000n);
+    expect(await merchant()).toBe(3500n); // сумма вернулась, комиссия — нет
     expect((await pool.query(`SELECT charged_back_amount FROM transactions WHERE id = $1`, [a.id])).rows[0].charged_back_amount).toBe(0n);
     expect(await ledgerBalanced()).toBe(true);
     const hist = (await call('GET', '/admin/v1/chargebacks?all=true')).json()[0].history.map((h: { status: string }) => h.status);

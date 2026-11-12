@@ -60,10 +60,10 @@ export async function importReport(pool: Pool, inp: ImportInput) {
     lines.push({ lineNo: r.lineNo, kind: r.kind, status: r.status, ref: r.ref, operationId: r.operationId, amount: r.amount,
       currency: r.currency, fee: r.fee, date: r.date, caseRef: r.caseRef, result, severity, details, transactionId });
 
-  let reportFees = 0n; let ourFees = 0n;
+  // Комиссии сравниваем только по совпавшим оплатам; остальное (чарджбэки, чужие строки, отдельные строки комиссий) — отдельно.
+  let reportFees = 0n; let ourFees = 0n; let otherFees = 0n;
   const seenPayments = new Set<string>();
   for (const r of report) {
-    reportFees += r.fee;
     const o = r.ref ? ours.get(r.ref) : undefined;
     if (r.kind === 'payment') {
       if (r.status === 'success') {
@@ -71,7 +71,7 @@ export async function importReport(pool: Pool, inp: ImportInput) {
         if (!o) add(r, 'unknown_to_us', 'bad', 'Провайдер получил оплату, а у нас платежа с таким ID на этом аккаунте нет');
         else if (o.att_status !== 'success' || o.tx_status !== 'success') add(r, 'not_credited', 'bad', `Оплачено у провайдера, у нас статус «${o.tx_status}» — деньги не зачислены`, o.tx_id);
         else if (r.amount !== o.amount || (r.currency && r.currency !== o.currency)) add(r, 'amount_mismatch', 'bad', `У провайдера ${fmt(r.amount, r.currency)}, у нас ${fmt(o.amount, o.currency)}`, o.tx_id);
-        else { add(r, 'matched', 'ok', 'Совпадает', o.tx_id); ourFees += o.provider_fee ?? 0n; }
+        else { add(r, 'matched', 'ok', 'Совпадает', o.tx_id); ourFees += o.provider_fee ?? 0n; reportFees += r.fee; }
       } else if (r.status === 'failed') {
         if (o && o.tx_status === 'success' && o.att_status === 'success') add(r, 'status_mismatch', 'bad', 'У провайдера оплата не прошла, а у нас зачислена', o.tx_id);
         else add(r, 'matched_failed', 'info', 'Неуспешная оплата — у нас тоже не зачислена', o?.tx_id ?? null);
@@ -84,8 +84,12 @@ export async function importReport(pool: Pool, inp: ImportInput) {
     } else if (r.kind === 'chargeback') {
       if (!o || o.tx_status !== 'success') { add(r, 'unknown_to_us', 'bad', 'Чарджбэк по платежу, который у нас не зачислен или не найден', o?.tx_id ?? null); continue; }
       try {
-        const cb = await openChargeback(pool, { transactionId: o.tx_id, amount: r.amount ?? undefined, caseRef: r.caseRef ?? `report:${r.ref}:${r.amount}`,
-          reasonCode: r.reason, source: 'report' }, { userId: inp.userId });
+        const cb = await openChargeback(pool, { transactionId: o.tx_id, amount: r.amount ?? undefined, fee: r.fee, caseRef: r.caseRef ?? `report:${r.ref}:${r.amount}`,
+          reasonCode: r.reason, source: 'report',
+          // Срока нет в выписке — ставим 7 дней, чтобы спор не потерялся; точный срок уточняется у провайдера.
+          respondBy: r.deadline ?? new Date(Date.now() + 7 * 86400e3).toISOString().slice(0, 10),
+          note: r.deadline ? 'найден в выписке провайдера' : 'найден в выписке; срока ответа в ней нет — стоит 7 дней, уточни у провайдера' },
+          { userId: inp.userId });
         add(r, cb.created ? 'chargeback_opened' : 'chargeback_known', cb.created ? 'warn' : 'ok',
           cb.created ? 'Новый чарджбэк — заведён в «Чарджбэках», ответь провайдеру в срок' : 'Чарджбэк уже учтён', o.tx_id);
       } catch (err) { add(r, 'chargeback_error', 'bad', `Не удалось завести чарджбэк: ${(err as Error).message}`, o.tx_id); }
@@ -116,12 +120,13 @@ export async function importReport(pool: Pool, inp: ImportInput) {
     }
   }
 
+  otherFees = report.reduce((s, r) => s + r.fee, 0n) - reportFees;
   const count = (sev: Severity) => lines.filter((l) => l.severity === sev).length;
   const sumOk = (kind: string) => lines.filter((l) => l.kind === kind && l.result === 'matched').reduce((s, l) => s + (l.amount ?? 0n), 0n);
   const summary = {
     rows: report.length, ok: count('ok'), info: count('info'), warn: count('warn'), bad: count('bad'),
     matchedPayments: sumOk('payment').toString(), matchedRefunds: sumOk('refund').toString(),
-    fees: { report: reportFees.toString(), ours: ourFees.toString(), diff: (reportFees - ourFees).toString() },
+    fees: { report: reportFees.toString(), ours: ourFees.toString(), diff: (reportFees - ourFees).toString(), other: otherFees.toString() },
     currency: acc.currency?.trim() ?? null,
   };
 

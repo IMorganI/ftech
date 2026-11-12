@@ -43,6 +43,8 @@ form input{flex:1;min-width:220px}.ok{color:var(--ok)}.bad{color:var(--bad)}.log
   <form method="post" action="/testpay/webhooks/test"><input type="hidden" name="key" value="${esc(k.key)}"><button>Отправить тестовое событие</button></form>
   <form method="post" action="/testpay/webhooks/roll"><input type="hidden" name="key" value="${esc(k.key)}"><button class="ghost">Перевыпустить секрет</button></form>
   ${last}` : '<div class="muted">Секрет подписи появится после сохранения адреса.</div>'}
+  <div class="muted">Выписка операций по этому ключу — загрузи в борде: «Контроль → Сверка с провайдером»</div>
+  <a href="/testpay/report.csv?key=${encodeURIComponent(k.key)}" download="testpay-report.csv">Скачать выписку (CSV)</a>
 </div>`;
     }).join('');
     return reply.type('text/html; charset=utf-8').send(page('TestPay · кабинет', `
@@ -53,8 +55,7 @@ ${cards || '<p class="muted">Ключей пока нет.</p>'}
 ${paid.length ? `<div class="card"><b>Оплаты</b><div class="muted">«Оспорить» — как будто игрок пошёл в банк: в выписке появится чарджбэк.</div>
 ${paid.map((p) => `<form method="post" action="/testpay/payments/${esc(p.id)}/dispute"><code>${esc(p.id)}</code>
  <span>${esc(`${p.amount / 100n}.${(p.amount % 100n).toString().padStart(2, '0')} ${p.currency}`)}</span><button class="ghost">Оспорить</button></form>`).join('')}</div>` : ''}
-<div class="card"><b>Выписка</b><div class="muted">Скачай и загрузи в борде: «Контроль → Сверка с провайдером».</div>
-<a href="/testpay/report.csv" download="testpay-report.csv">Скачать выписку (CSV)</a></div>`));
+`));
   });
 
   app.post('/testpay/keys', async (_req, reply) => { sim.createKey(); return reply.redirect('/testpay', 303); });
@@ -83,10 +84,11 @@ ${paid.map((p) => `<form method="post" action="/testpay/payments/${esc(p.id)}/di
     return reply.redirect('/testpay', 303);
   });
 
-  app.get('/testpay/report.csv', async (_req, reply) => reply
+  // Выписка по одному API-ключу (= один мерчант-аккаунт), как экспорт в кабинете настоящего провайдера.
+  app.get<{ Querystring: { key?: string } }>('/testpay/report.csv', async (req, reply) => reply
     .header('content-type', 'text/csv; charset=utf-8')
     .header('content-disposition', 'attachment; filename="testpay-report.csv"')
-    .send(sim.reportCsv()));
+    .send(sim.reportCsv(req.query.key || undefined)));
 
   app.get<{ Params: { id: string } }>('/testpay/pay/:id', async (req, reply) => {
     const p = sim.payments.get(req.params.id);
