@@ -58,3 +58,41 @@ jobs:
             -e MOCK_PROVIDER_ENABLED=true ftech:ci 2>&1 || true)
           echo "$out" | grep -q "MOCK_PROVIDER_ENABLED=true запрещён" || { echo "$out"; exit 1; }
 
+  # Автотесты борды в настоящем браузере: вход с 2FA, все разделы по ролям, платёж, выплата, лимиты, телефон.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ftech
+          POSTGRES_PASSWORD: ftech
+          POSTGRES_DB: ftech_e2e
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ftech" --health-interval 5s --health-retries 10
+    env:
+      E2E_DATABASE_URL: postgres://ftech:ftech@localhost:5432/ftech_e2e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - name: Браузер для тестов
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      # Если тест упал — отчёт со скриншотами и записью действий (trace) лежит в артефактах запуска.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: e2e-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

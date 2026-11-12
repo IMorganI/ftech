@@ -12,6 +12,9 @@ const schema = z.object({
   // Общий предел запросов к API сайтов с одного IP (защита от перебора ключей и мусорного трафика).
   RATE_LIMIT_PER_IP_PER_MINUTE: z.coerce.number().int().positive().default(3000),
   MOCK_PROVIDER_ENABLED: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
+  // Доля мгновенных отказов и дублей вебхуков у тестового провайдера (для демо); автотесты ставят 0.
+  MOCK_DECLINE_RATE: z.coerce.number().min(0).max(1).default(0.1),
+  MOCK_DUPLICATE_WEBHOOK_RATE: z.coerce.number().min(0).max(1).default(0.2),
   // За балансировщиком/прокси (Codespaces, облако): брать IP клиента из X-Forwarded-For.
   TRUST_PROXY: z.enum(['true', 'false']).default('false').transform((v) => v === 'true'),
   // Через сколько секунд после отправки сверка сама спрашивает провайдера о статусе (если не пришёл вебхук).

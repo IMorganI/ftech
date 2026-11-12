@@ -329,7 +329,7 @@ async function viewAnalytics(main) {
   const [colName, colExtra] = { operator: ['Оператор', null], site: ['Сайт', 'Оператор'], account: ['Аккаунт', 'Провайдер'], provider: ['Провайдер', null] }[f.groupBy];
 
   const seg = (items, cur, onPick, label) => h('div', { class: 'seg', role: 'group', 'aria-label': label },
-    items.map(([id, name]) => h('button', { class: id === cur ? 'on' : '', 'aria-pressed': id === cur, onclick: () => onPick(id) }, name)));
+    items.map(([id, name]) => h('button', { class: id === cur ? 'on' : '', 'aria-pressed': String(id === cur), onclick: () => onPick(id) }, name)));
 
   const fromIn = h('input', { type: 'date', value: f.from, max: today, 'aria-label': 'С' });
   const toIn = h('input', { type: 'date', value: f.to, max: today, 'aria-label': 'По' });
@@ -484,7 +484,7 @@ async function viewOverview(main) {
     sub ? h('span', { class: 'kpi-sub' }, sub) : null);
 
   const switcher = h('div', { class: 'seg', role: 'group', 'aria-label': 'Период' },
-    PERIODS.map(([id, name]) => h('button', { class: id === period ? 'on' : '', 'aria-pressed': id === period, onclick: () => { state.cache.period = id; renderShell(); } }, name)));
+    PERIODS.map(([id, name]) => h('button', { class: id === period ? 'on' : '', 'aria-pressed': String(id === period), onclick: () => { state.cache.period = id; renderShell(); } }, name)));
 
   const goto = (tab) => () => go(tab);
 
@@ -589,7 +589,7 @@ async function viewAccounts(main) {
       cap.operators.length ? h('div', { class: 'stack' }, cap.operators.map((o) => h('div', { class: 'row start' },
         h('span', null, h('b', null, o.name), ': '),
         can('admin') ? h('div', { class: 'seg', role: 'group', 'aria-label': 'Режим распределения' }, MODES.map(([id, label]) =>
-          h('button', { class: o.routing_mode === id ? 'on' : '', 'aria-pressed': o.routing_mode === id, onclick: async () => {
+          h('button', { class: o.routing_mode === id ? 'on' : '', 'aria-pressed': String(o.routing_mode === id), onclick: async () => {
             await api('PATCH', `/admin/v1/operators/${o.id}`, { routingMode: id }); renderShell(); } }, label)))
           : h('span', { class: 'pill n' }, MODES.find(([id]) => id === o.routing_mode)[1])))) : null),
     h('section', { class: 'panel' },
@@ -994,7 +994,7 @@ function viewSandbox(main) {
       const limit = v.limit.trim() ? toCents(v.limit) : null;
       const res = await fetch('/v1/deposits', { method: 'POST', headers: {
         'content-type': 'application/json', authorization: `Bearer ${sb.key}`, 'idempotency-key': `sandbox-${crypto.randomUUID()}` },
-        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), returnUrl: location.origin + '/admin#payments',
+        body: JSON.stringify({ amount, currency: v.currency.trim().toUpperCase(), returnUrl: location.protocol === 'https:' ? location.origin + '/admin#payments' : undefined, // сайты принимают только https
           player: { id: v.player.trim(), country: v.country.trim().toUpperCase(), kyc: v.kyc, depositLimitDaily: limit, selfExcluded: v.selfExcluded } }) });
       const data = await res.json().catch(() => null);
       if (!res.ok) { const e = new Error(data?.error?.message || `Ошибка ${res.status}`); e.details = data?.error?.details; throw e; }
