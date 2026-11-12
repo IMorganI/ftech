@@ -126,6 +126,7 @@ function handleAuthError(err) {
 
 function authScreen(title, ...body) {
   clearInterval(state.timer);
+  document.body.classList.remove('app');
   put(root, h('div', { class: 'auth' }, h('div', { class: 'brand' }, 'ftech · борда'), h('h1', null, title), body));
 }
 
@@ -173,11 +174,28 @@ function showChangePassword() {
 
 // ---------- каркас ----------
 
-const TABS = [
-  ['overview', 'Обзор', 'viewer'], ['payments', 'Платежи', 'viewer'], ['manual', 'Выплаты', 'viewer'],
-  ['connect', 'Подключения', 'viewer'], ['accounts', 'Лимиты', 'viewer'], ['sandbox', 'Тест-платёж', 'viewer'],
-  ['issues', 'Проблемы', 'viewer'], ['users', 'Команда', 'admin'], ['audit', 'Журнал', 'admin'],
+// Меню: группы → разделы. [id, название, минимальная роль, подзаголовок страницы]
+const MENU = [
+  ['Деньги', [
+    ['overview', 'Обзор', 'viewer', 'Депозиты, оборот и заработок платформы за период'],
+    ['payments', 'Платежи', 'viewer', 'Все депозиты и выплаты: поиск, статусы, попытки по аккаунтам'],
+    ['manual', 'Ручные выплаты', 'viewer', 'Остатки выплат, которые не удалось вернуть на карту'],
+  ]],
+  ['Подключения', [
+    ['connect', 'Операторы и аккаунты', 'viewer', 'Платёжные аккаунты, ключи провайдеров, вебхуки и сайты'],
+    ['accounts', 'Лимиты и маршрутизация', 'viewer', 'Сколько осталось до лимита каждого аккаунта сегодня'],
+    ['sandbox', 'Тест-платёж', 'viewer', 'Проверить маршрутизацию и оплату без сайта'],
+  ]],
+  ['Контроль', [
+    ['issues', 'Проблемы', 'viewer', 'Расхождения с провайдерами, которые разбирает человек'],
+    ['audit', 'Журнал действий', 'admin', 'Кто, что и когда менял в борде'],
+  ]],
+  ['Настройки', [
+    ['users', 'Команда', 'admin', 'Доступы сотрудников и роли'],
+  ]],
 ];
+const TABS = MENU.flatMap(([, items]) => items);
+const ROLE_RU = { viewer: 'наблюдатель', operator: 'оператор', admin: 'администратор' };
 
 async function boot() {
   try {
@@ -191,17 +209,54 @@ async function boot() {
   }
 }
 
+function go(id) { state.tab = id; location.hash = id; document.body.classList.remove('menu-open'); renderShell(); }
+
+/** Счётчики в меню: ручные выплаты и открытые проблемы. */
+async function refreshBadges() {
+  try {
+    const o = await api('GET', '/admin/v1/overview');
+    state.badges = { manual: o.manual_payouts ?? 0, issues: o.open_issues ?? 0 };
+    for (const [id, n] of Object.entries(state.badges)) {
+      const b = document.querySelector(`[data-badge="${id}"]`);
+      if (b) { b.textContent = n > 99 ? '99+' : String(n); b.hidden = !n; }
+    }
+  } catch { /* не критично */ }
+}
+
 function renderShell() {
-  const nav = h('nav', { class: 'tabs', 'aria-label': 'Разделы' },
-    TABS.filter(([, , role]) => can(role)).map(([id, label]) =>
-      h('button', { class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => { state.tab = id; location.hash = id; renderShell(); } }, label)));
+  const badges = state.badges || {};
+  const nav = h('nav', { class: 'side-nav', 'aria-label': 'Разделы' },
+    MENU.map(([group, items]) => {
+      const visible = items.filter(([, , role]) => can(role));
+      if (!visible.length) return null;
+      return h('div', { class: 'nav-group' },
+        h('div', { class: 'nav-title' }, group),
+        visible.map(([id, label]) => h('button', {
+          class: state.tab === id ? 'on' : '', 'aria-current': state.tab === id ? 'page' : null, onclick: () => go(id),
+        }, h('span', null, label),
+          ['manual', 'issues'].includes(id) ? h('span', { class: `badge ${id === 'issues' ? 'bad' : 'warn'}`, 'data-badge': id, hidden: !badges[id] }, String(badges[id] ?? 0)) : null)));
+    }));
+  const [, title, , subtitle] = TABS.find(([id]) => id === state.tab) || TABS[0];
+  const group = MENU.find(([, items]) => items.some(([id]) => id === state.tab))?.[0] ?? '';
   const main = h('main', { id: 'main' });
-  put(root, 
-    h('header', { class: 'top' },
-      h('span', { class: 'brand' }, 'ftech'), nav,
-      h('div', { class: 'who' }, `${state.me.email} · ${state.me.role}`,
-        h('button', { class: 'sm', onclick: async () => { await api('POST', '/admin/v1/auth/logout').catch(() => {}); state.me = null; showLogin(); } }, 'Выйти'))),
-    main);
+  document.body.classList.add('app');
+  put(root,
+    h('div', { class: 'layout' },
+      h('aside', { class: 'side' },
+        h('div', { class: 'side-head' },
+          h('div', { class: 'logo' }, h('span', { class: 'logo-mark' }, 'f'), h('span', null, 'ftech')),
+          h('button', { class: 'menu-btn', 'aria-label': 'Меню', onclick: () => document.body.classList.toggle('menu-open') }, '☰')),
+        nav,
+        h('div', { class: 'side-foot' },
+          h('div', { class: 'me' }, h('b', null, state.me.email), h('span', null, ROLE_RU[state.me.role] || state.me.role)),
+          h('button', { class: 'sm', onclick: async () => { await api('POST', '/admin/v1/auth/logout').catch(() => {}); state.me = null; showLogin(); } }, 'Выйти'))),
+      h('div', { class: 'content' },
+        h('header', { class: 'page-head' },
+          h('div', { class: 'crumb' }, group),
+          h('h1', null, title),
+          h('p', null, subtitle)),
+        main)));
+  refreshBadges();
   clearInterval(state.timer);
   const view = VIEWS[state.tab];
   const run = async () => {
@@ -280,7 +335,7 @@ async function viewOverview(main) {
   const switcher = h('div', { class: 'seg', role: 'group', 'aria-label': 'Период' },
     PERIODS.map(([id, name]) => h('button', { class: id === period ? 'on' : '', 'aria-pressed': id === period, onclick: () => { state.cache.period = id; renderShell(); } }, name)));
 
-  const goto = (tab) => () => { state.tab = tab; location.hash = tab; renderShell(); };
+  const goto = (tab) => () => go(tab);
 
   put(main, ...[
     attempts === 0 && o.tx_24h === 0 ? h('section', { class: 'panel hint' },
@@ -632,7 +687,7 @@ async function viewOperator(main, opId) {
   const accs = accounts.filter((a) => a.operator_id === opId);
   const mySites = sites.filter((s) => s.operator_id === opId);
   clearInterval(state.timer); // страница с формами — без автообновления
-  const goto = (tab) => () => { state.tab = tab; location.hash = tab; renderShell(); };
+  const goto = (tab) => () => go(tab);
 
   const checklist = h('ol', { class: 'checklist' }, readiness.steps.map((s) => h('li', { class: s.done ? 'done' : '' },
     h('span', { class: 'mark', 'aria-hidden': 'true' }, s.done ? '✓' : ''),
